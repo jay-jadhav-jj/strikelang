@@ -1,6 +1,6 @@
-use core::fmt;
+ use core::fmt;
 
-use super::jcmderror::*;
+use super::strikeerror::*;
 
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -24,6 +24,13 @@ pub enum Token {
     Comma,
     ReqStr,
     ReqMutStr,
+    LCurly,
+    RCurly,
+    Eq, // TODO doubleeq, noteq, : filter, ! map
+    Add,
+    Sub,
+    Mul,
+    Div
 }
 
 impl fmt::Display for Token {
@@ -46,13 +53,20 @@ impl fmt::Display for Token {
             Token::Comma => write!(f, "Comma"),
             Token::ReqStr => write!(f, "ReqStr"),
             Token::ReqMutStr => write!(f, "ReqMutStr"),
+            Token::RCurly => write!(f, "RCurly"),
+            Token::LCurly => write!(f, "LCurly"),
+            Token::Eq => write!(f, "Equal"),
+            Token::Add => write!(f, "Add"),
+            Token::Sub => write!(f, "Sub"),
+            Token::Mul => write!(f, "Mul"),
+            Token::Div => write!(f, "Div"),
         }
     }
 }
 
 pub struct Lexer {
     idx: usize,
-    tokens: Vec<(Token, String)>,
+    tokens: Vec<(Token, Span)>,
     line: u32,
     file: String,
     chars: Vec<char>
@@ -67,6 +81,10 @@ impl Lexer {
             file: file,
             chars: feed.clone().chars().collect()
         }
+    }
+
+    fn error(&self, code : u16, start: usize, msg: &str) -> Error {
+        Error::from_code(self.file.clone(), String::from(self.chars.iter().collect::<String>()), &code, Some(Span::new(start, self.location())), msg)
     }
 
     fn nth_char(&self, idx: usize) -> Option<char> {
@@ -161,15 +179,15 @@ impl Lexer {
         Ok(buf)
     }
 
-    fn location(&self) -> String {
-        format!("File {}, Line {}, Index {}", self.file, self.line, self.idx)
+    fn location(&self) -> usize {
+        self.idx
     }
 
-    fn pushwloc(&mut self, tok: Token) {
-        self.tokens.push((tok, self.location()));
+    fn pushwloc(&mut self, tok: Token, start: usize) {
+        self.tokens.push((tok, Span::new(start, self.location())));
     }
     
-    pub fn lex(&mut self) -> Result<Vec<(Token, String)>, Error> {
+    pub fn lex(&mut self) -> Result<Vec<(Token, Span)>, Error> {
         self.idx = 0;
         loop {
             if self.idx >= self.chars.len() {
@@ -178,11 +196,11 @@ impl Lexer {
             let cur = &self.nth_char(self.idx).unwrap();
 
             if *cur == '/' {
-                if self.peek().unwrap_or('N') == '/' {
+                if self.peek().unwrap_or('N') == '*' {
                         self.idx += 1;
                         let mut endtok = false;
                         while self.idx < self.chars.len() {
-                            if self.nth_char(self.idx).unwrap() == '/' && self.peek().unwrap_or('N') == '/' {
+                            if self.nth_char(self.idx).unwrap() == '*' && self.peek().unwrap_or('N') == '/' {
                                 self.idx += 2;
                                 endtok = true;
                                 break;
@@ -191,16 +209,8 @@ impl Lexer {
                         }
 
                         if !endtok {
-                            return Err(Error::from_code(&COMMENT_SYNTAX, Some(self.location()), "Multi line comment not ended"));
+                            return Err(self.error(COMMENT_SYNTAX, self.location(), "Multi line comment not ended (/* ... */)"));
                         }
-                } else {
-                    while self.idx < self.chars.len() {
-                        if self.nth_char(self.idx).unwrap() == '\n' {
-                            self.idx += 1;
-                            break;
-                        }
-                        self.idx += 1;
-                    }
                     continue;
                 }
             } else if cur.is_whitespace() {
@@ -210,6 +220,7 @@ impl Lexer {
                 self.idx += 1;
                 continue;
             } else if Lexer::is_id_char(*cur) {
+                let start = self.location();
                 let id = self.lex_id();
                 self.pushwloc(match id.as_str() {
                     "for" => Token::ForOpen,
@@ -221,59 +232,87 @@ impl Lexer {
                     "reqstr" => Token::ReqStr,
                     "reqmutstr" => Token::ReqMutStr,
                     _ => Token::ID(id),
-                });
+                }, start);
                 continue;
             } else if Lexer::is_num_char(*cur) {
+                let start = self.location();
                 let strlit = match self.lex_num() {
                     Ok(buf) => buf,
 
                     Err(text) => {
-                        return Err(Error::from_code(&NUM_SYNTAX, Some(self.location()), &text));
+                        return Err(self.error(NUM_SYNTAX, start, &text));
                     }
                 };
 
                 if strlit.contains(".") {
-                    self.pushwloc(Token::Val(Value::Float((strlit.parse::<f32>().unwrap()))));
+                    self.pushwloc(Token::Val(Value::Float((strlit.parse::<f32>().unwrap()))), start);
                 } else {
-                    self.pushwloc(Token::Val(Value::Int(strlit.parse::<i32>().unwrap())));
+                    self.pushwloc(Token::Val(Value::Int(strlit.parse::<i32>().unwrap())), start);
                 }
                 continue;
             } else if *cur == '"' {
+                let start = self.location();
                 let val = match self.lex_str() {
                     Ok(buf) => buf,
 
                     Err(text) => {
-                        return Err(Error::from_code(
-                            &STRING_SYNTAX,
-                            Some(self.location()),
-                            &text,
-                        ));
+                        return Err(self.error(STRING_SYNTAX, start, &text));
                     }
                 };
 
-                self.pushwloc(Token::Val(Value::Str(val)));
+                self.pushwloc(Token::Val(Value::Str(val)), start);
                 continue;
             } else {
                 match *cur {
                     '(' => {
-                        self.pushwloc(Token::LParen);
+                        self.pushwloc(Token::LParen, self.location());
                     }
 
                     ')' => {
-                        self.pushwloc(Token::RParen);
+                        self.pushwloc(Token::RParen, self.location());
                     }
 
                     ',' => {
-                        self.pushwloc(Token::Comma);
+                        self.pushwloc(Token::Comma, self.location());
                     }
+
+                    '{' => {
+                        self.pushwloc(Token::LCurly, self.location());
+                    }
+
+                    '}' => {
+                        self.pushwloc(Token::RCurly, self.location());
+                    }
+
+                    '=' => {
+                        self.pushwloc(Token::Eq, self.location());
+                    }
+
+                    '+' => {
+                        self.pushwloc(Token::Add, self.location());
+                    }
+
+                    '-' => {
+                        self.pushwloc(Token::Sub, self.location());
+                    }
+
+                    '*' => {
+                        self.pushwloc(Token::Mul, self.location());
+                    }
+
+                    '/' => {
+                        self.pushwloc(Token::Div, self.location());
+                    }
+                    
                     _ => {
-                        return Err(Error::from_code(
-                            &UNEXPECTED_CHAR,
-                            Some(self.location()),
+                        return Err(self.error(
+                            UNEXPECTED_CHAR,
+                            self.location(),
                             &format!("Unexpected character '{}' during lexing", cur),
                         ));
                     }
                 }
+                self.idx += 1;
             }
         }
         Ok(self.tokens.clone())
