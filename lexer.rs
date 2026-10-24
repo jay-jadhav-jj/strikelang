@@ -2,23 +2,23 @@
 
 use super::strikeerror::*;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Float(f32),
-    Int(i32),
+    Int(i64),
     Str(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Token {
     Val(Value),
     ID(String),
     ForOpen,
     ForClose,
-    AsmOpen,
-    AsmClose,
+    Asm(String),
     Exit,
-    Macro,
+    Func,
+    Proc,
     LParen,
     RParen,
     Comma,
@@ -30,7 +30,9 @@ pub enum Token {
     Add,
     Sub,
     Mul,
-    Div
+    Div,
+    Greater,
+    Less,
 }
 
 impl fmt::Display for Token {
@@ -44,10 +46,10 @@ impl fmt::Display for Token {
             Token::ID(id) => write!(f, "ID({})", id),
             Token::ForOpen => write!(f, "ForOpen"),
             Token::ForClose => write!(f, "ForClose"),
-            Token::AsmOpen => write!(f, "AsmOpen"),
-            Token::AsmClose => write!(f, "AsmClose"),
+            Token::Asm(raw) => write!(f, "Asm({})", raw),
             Token::Exit => write!(f, "Exit"),
-            Token::Macro => write!(f, "Macro"),
+            Token::Func => write!(f, "Func"),
+            Token::Proc => write!(f, "Proc"),
             Token::LParen => write!(f, "LParen"),
             Token::RParen => write!(f, "RParen"),
             Token::Comma => write!(f, "Comma"),
@@ -60,6 +62,8 @@ impl fmt::Display for Token {
             Token::Sub => write!(f, "Sub"),
             Token::Mul => write!(f, "Mul"),
             Token::Div => write!(f, "Div"),
+            Token::Greater => write!(f, "Greater"),
+            Token::Less => write!(f, "Less"),
         }
     }
 }
@@ -187,6 +191,40 @@ impl Lexer {
         self.tokens.push((tok, Span::new(start, self.location())));
     }
     
+    fn lex_asm(&mut self) -> Result<Token, String> {
+        self.idx += 1;
+        if self.idx >= self.chars.len() || self.nth_char(self.idx).unwrap() != '{' {
+            return Err(String::from("Expected asm block (@{ ... })"));
+        }
+        self.idx += 1;
+        let mut buf = String::new();
+        let mut block_closed = false;
+        let mut brace_layers = 1u16;
+
+        while self.idx < self.chars.len() {
+            if self.nth_char(self.idx).unwrap() == '{' {
+                brace_layers += 1;
+            }
+            if self.nth_char(self.idx).unwrap() == '}' {
+                brace_layers -= 1;
+                if brace_layers == 0 {
+                    self.idx += 1;
+                    block_closed = true;
+                    break;
+                }
+            }
+
+            buf += &self.nth_char(self.idx).unwrap().to_string();
+            self.idx += 1;
+        };
+
+        if block_closed {
+            return Ok(Token::Asm(buf));
+        }
+
+        Err(String::from("Asm block not closed (@{ ... })"))
+    }
+
     pub fn lex(&mut self) -> Result<Vec<(Token, Span)>, Error> {
         self.idx = 0;
         loop {
@@ -195,8 +233,17 @@ impl Lexer {
             }
             let cur = &self.nth_char(self.idx).unwrap();
 
-            if *cur == '/' {
+            if *cur == '#' {
+                while self.idx < self.chars.len() {
+                    if self.nth_char(self.idx).unwrap() == '\n' {
+                        self.idx += 1;
+                        break;
+                    }
+                    self.idx += 1;
+                }
+            } else if *cur == '/' {
                 if self.peek().unwrap_or('N') == '*' {
+                        let start = self.location();
                         self.idx += 1;
                         let mut endtok = false;
                         while self.idx < self.chars.len() {
@@ -209,9 +256,24 @@ impl Lexer {
                         }
 
                         if !endtok {
-                            return Err(self.error(COMMENT_SYNTAX, self.location(), "Multi line comment not ended (/* ... */)"));
+                            return Err(self.error(COMMENT_SYNTAX, start, "Multi line comment not ended (/* ... */)"));
                         }
                     continue;
+                }
+                self.pushwloc(Token::Div, self.location());
+                self.idx += 1;
+                continue;
+            } else if *cur == '@' {
+                let start = self.location();
+                match self.lex_asm() {
+                    Ok(tok) => {
+                        self.pushwloc(tok, start);
+                        continue;
+                    }
+
+                    Err(text) => {
+                        return Err(self.error(ASM_SYNTAX, start, &text));
+                    }
                 }
             } else if cur.is_whitespace() {
                 if *cur == '\n' {
@@ -224,11 +286,10 @@ impl Lexer {
                 let id = self.lex_id();
                 self.pushwloc(match id.as_str() {
                     "for" => Token::ForOpen,
-                    "endfor" => Token::ForClose,
-                    "asm" => Token::AsmOpen,
-                    "endasm" => Token::AsmClose,
+                    "endfr" => Token::ForClose,
                     "exit" => Token::Exit,
-                    "macro" => Token::Macro,
+                    "fn" => Token::Func,
+                    "proc" => Token::Proc,
                     "reqstr" => Token::ReqStr,
                     "reqmutstr" => Token::ReqMutStr,
                     _ => Token::ID(id),
@@ -247,7 +308,7 @@ impl Lexer {
                 if strlit.contains(".") {
                     self.pushwloc(Token::Val(Value::Float((strlit.parse::<f32>().unwrap()))), start);
                 } else {
-                    self.pushwloc(Token::Val(Value::Int(strlit.parse::<i32>().unwrap())), start);
+                    self.pushwloc(Token::Val(Value::Int(strlit.parse::<i64>().unwrap())), start);
                 }
                 continue;
             } else if *cur == '"' {
@@ -299,11 +360,14 @@ impl Lexer {
                     '*' => {
                         self.pushwloc(Token::Mul, self.location());
                     }
-
-                    '/' => {
-                        self.pushwloc(Token::Div, self.location());
-                    }
                     
+                    '>' => {
+                        self.pushwloc(Token::Greater, self.location());
+                    }
+
+                    '<' => {
+                        self.pushwloc(Token::Less, self.location());
+                    }
                     _ => {
                         return Err(self.error(
                             UNEXPECTED_CHAR,
