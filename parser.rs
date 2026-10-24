@@ -3,7 +3,7 @@ use super::strikeerror::*;
 
 // Native JCMDLANG types; JUST TYPES not values
 #[derive(Clone, PartialEq, Debug)]
-enum Type {
+pub enum Type {
     Int,
     Str,
     List(Vec<Type>),
@@ -44,7 +44,7 @@ impl Type {
 }
 
 // Store locations with AST nodes
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum AST {
     VarSet {
         id: String,
@@ -71,29 +71,35 @@ pub enum AST {
         code: Box<AST>,
     },
     ASM {
-        body: Box<AST>,
+        body: String,
     },
-    MacroDef {
+    ProcDef {
         name: String,
         params: Vec<(String, Type)>,
         body: Vec<Box<AST>>,
     },
-    MicroDef {
+    FuncDef {
         name: String,
         params: Vec<(String, Type)>,
         body: Vec<Box<AST>>,
         rettype: Type,
     },
-    MacroCall {
+    ProcCall {
         name: String,
         args: Vec<Box<AST>>,
     },
-    MicroCall {
+    FuncCall {
         name: String,
         args: Vec<Box<AST>>,
     },
     Value {
         val: Value,
+    },
+    ReqStr {
+        expr: Box<AST>
+    },
+    ReqMutStr {
+        expr: Box<AST>
     },
 }
 
@@ -161,8 +167,8 @@ impl fmt::Display for AST {
                 write!(f, "ASM({body})")
             }
 
-            AST::MacroDef { name, params, body } => {
-                write!(f, "MacroDef({name}, params=[")?;
+            AST::ProcDef { name, params, body } => {
+                write!(f, "ProcDef({name}, params=[")?;
 
                 for (i, (param, ty)) in params.iter().enumerate() {
                     if i > 0 {
@@ -183,13 +189,13 @@ impl fmt::Display for AST {
                 write!(f, "])")
             }
 
-            AST::MicroDef {
+            AST::FuncDef {
                 name,
                 params,
                 body,
                 rettype,
             } => {
-                write!(f, "MicroDef({name}, params=[")?;
+                write!(f, "FuncDef({name}, params=[")?;
 
                 for (i, (param, ty)) in params.iter().enumerate() {
                     if i > 0 {
@@ -210,8 +216,8 @@ impl fmt::Display for AST {
                 write!(f, "])")
             }
 
-            AST::MacroCall { name, args } => {
-                write!(f, "MacroCall({name}, args=[")?;
+            AST::ProcCall { name, args } => {
+                write!(f, "ProcCall({name}, args=[")?;
 
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -223,8 +229,8 @@ impl fmt::Display for AST {
                 write!(f, "])")
             }
 
-            AST::MicroCall { name, args } => {
-                write!(f, "MicroCall({name}, args=[")?;
+            AST::FuncCall { name, args } => {
+                write!(f, "FuncCall({name}, args=[")?;
 
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
@@ -243,6 +249,14 @@ impl fmt::Display for AST {
                     Value::Float(v) => write!(f, "Float({v})"),
                 }
             }
+
+            AST::ReqStr { expr } => {
+                write!(f, "ReqStr({expr})")
+            }
+
+            AST::ReqMutStr { expr } => {
+                write!(f, "ReqMutStr({expr})")
+            }
         }
     }
 }
@@ -251,16 +265,16 @@ impl fmt::Display for AST {
 
 #[derive(Clone)]
 struct ParserScope {
-    macros: Vec<AST>,
-    micros: Vec<AST>,
+    procs: Vec<AST>,
+    funcs: Vec<AST>,
     vars: Vec<(String, Type)>,
 }
 
 impl ParserScope {
     pub fn new() -> ParserScope {
         ParserScope {
-            macros: Vec::new(),
-            micros: Vec::new(),
+            procs: Vec::new(),
+            funcs: Vec::new(),
             vars: Vec::new(),
         }
     }
@@ -288,17 +302,17 @@ impl Parser {
     }
 
     fn error(&self, code: u16, start: usize, end: Option<usize>, msg: &str) -> Error {
-        Error::from_code(self.filename.clone(), self.raw.clone(), &code, Some(Span::new(start, end.unwrap_or(self.prev_location()))), msg)
+        Error::from_code(self.filename.clone(), self.raw.clone(), &code, Some(Span::new(start, end.unwrap_or(self.location().end))), msg)
     }
 
     fn not_defined_err(&self, start: usize, end: Option<usize>, id: String) -> Error {
-        Error::not_defined_err(self.filename.clone(), self.raw.clone(), Span::new(start, end.unwrap_or(self.prev_location())), &id)
+        Error::not_defined_err(self.filename.clone(), self.raw.clone(), Span::new(start, end.unwrap_or(self.location().end)), &id)
     }
 
-    fn find_macro(&self, macname: &str) -> Option<AST> {
-        for m in &self.scope.macros {
-            if let AST::MacroDef { name, .. } = m {
-                if name == macname {
+    fn find_proc(&self, procname: &str) -> Option<AST> {
+        for m in &self.scope.procs {
+            if let AST::ProcDef { name, .. } = m {
+                if name == procname {
                     return Some(m.clone());
                 }
             }
@@ -307,16 +321,16 @@ impl Parser {
         None
     }
 
-    fn find_micro(&self, micname: &str) -> Option<AST> {
-        for m in &self.scope.micros {
-            if let AST::MicroDef {
+    fn find_func(&self, fnname: &str) -> Option<AST> {
+        for m in &self.scope.funcs {
+            if let AST::FuncDef {
                 name,
                 params,
                 body,
                 rettype,
             } = m
             {
-                if name == micname {
+                if name == fnname {
                     return Some(m.clone());
                 }
             }
@@ -335,28 +349,18 @@ impl Parser {
         None
     }
 
-    fn location(&self) -> usize {
-        if self.idx >= self.tokens.len() {
-            return self.idx;
-        }
-        self.idx
+    fn location(&self) -> Span {
+        self.get_token_span().unwrap_or(self.tokens[self.tokens.len() - 1].1)
     }
 
-    fn prev_location(&self) -> usize {
-        if self.idx - 1 >= self.tokens.len() {
-            return self.idx;
-        }
-        self.idx
-    }
-
-    fn get_token(&mut self) -> Option<Token> {
+    fn get_token(&self) -> Option<Token> {
         if self.idx < self.tokens.len() {
             return Some(self.tokens[self.idx].0.clone());
         }
         None
     }
 
-    fn get_token_span(&mut self) -> Option<Span> {
+    fn get_token_span(&self) -> Option<Span> {
         if self.idx < self.tokens.len() {
             return Some(self.tokens[self.idx].1);
         }
@@ -412,8 +416,8 @@ impl Parser {
                 }
             }
 
-            AST::MicroCall { name, args } => {
-                if let Some(AST::MicroDef { rettype, .. }) = self.find_micro(name) {
+            AST::FuncCall { name, args } => {
+                if let Some(AST::FuncDef { rettype, .. }) = self.find_func(name) {
                     return Some(rettype);
                 } else {
                     return None;
@@ -428,12 +432,16 @@ impl Parser {
                 }
             }
 
+            AST::ReqStr { expr } | AST::ReqMutStr { expr } => {
+                return Some(Type::Str);
+            }
+
             _ => None,
         }
     }
 
     fn parse_unit(&mut self) -> Result<AST, Error> {
-        let start = self.location();
+        let start = self.location().start;
         if let Some(tok) = self.next_token() {
             match tok {
                 // Unary sub op (e.g -x, -10, even ---3 is valid syntax who cares?)
@@ -459,7 +467,7 @@ impl Parser {
                             } else {
                                 return Err(self.error(
                                     BRACKET,
-                                    self.prev_location(),
+                                    self.location().start,
                                     None,
                                     "I think you're missing a ')'",
                                 ));
@@ -474,7 +482,7 @@ impl Parser {
                     if let Value::Float(_) = v {
                         return Err(self.error(
                             NOT_IMPLEMENTED,
-                            self.location(),
+                            self.location().start,
                             None,
                             "Floats no bueno yet",
                         ));
@@ -484,21 +492,21 @@ impl Parser {
                 }
 
                 Token::ID(id) => {
-                    if let Some(AST::MicroDef {
+                    if let Some(AST::FuncDef {
                         name,
                         params,
                         body,
                         rettype,
-                    }) = self.find_micro(&id)
+                    }) = self.find_func(&id)
                     {
                         let mut args: Vec<Box<AST>> = Vec::new();
-                        let start = self.location();
+                        let start = self.location().start;
 
                         if let Some(Token::LParen) = self.get_token() {
                             self.next_token();
 
                             for p in &params {
-                                let start = self.location();
+                                let start = self.location().start;
                                 match self.parse_expr() {
                                     Ok(arg) => {
                                         if let Some(t) = self.get_type(&arg) {
@@ -515,7 +523,7 @@ impl Parser {
                                         } else {
                                             if let AST::VarGet { id } = arg {
                                                 return Err(self.not_defined_err(
-                                                    self.location(),
+                                                    self.location().start,
                                                     None,
                                                     id,
                                                 ));
@@ -523,7 +531,7 @@ impl Parser {
                                             return Err(self.error(
                                                 TYPE_ERR,
                                                 start,
-                                                Some(self.location()),
+                                                Some(self.location().end),
                                                 "Unable to determine type of expression result",
                                             ));
                                         }
@@ -541,7 +549,7 @@ impl Parser {
                             }
                             if let Some(Token::RParen) = self.get_token() {
                                 self.next_token();
-                                return Ok(AST::MicroCall {
+                                return Ok(AST::FuncCall {
                                     name: id,
                                     args: args,
                                 });
@@ -549,27 +557,101 @@ impl Parser {
                                 return Err(self.error(
                                     BRACKET,
                                     start,
-                                    Some(self.location()),
-                                    "Expected closing ')' on microcommand call",
+                                    Some(self.location().end),
+                                    "Expected closing ')' on function call",
                                 ));
                             }
                         } else {
-                            return Err(self.error(ID_ERR, start, None, "Expected microcommand call ()"));
+                            return Err(self.error(ID_ERR, start, None, "Expected function call ()"));
                         }
                     } else {
                         if self.find_var(&id).is_none() {
-                            return Err(self.not_defined_err(start, Some(self.location()), id));
+                            return Err(self.not_defined_err(start, Some(self.location().end), id));
                         }
                         return Ok(AST::VarGet { id: id });
                     }
+                }
+
+                Token::ReqStr => {
+                    if self.idx >= self.tokens.len() || !matches!(self.tokens[self.idx].0, Token::Less) {
+                        return Err(self.error(
+                            EXPECTED_VAL,
+                            start,
+                            Some(self.location().end),
+                            "Expected '<' in reqstr compiler instruction (reqstr<STRING>)",
+                        ));
+                    }
+
+                    self.next_token();
+
+                    let start = self.location().start;
+                    match self.parse_expr() {
+                        Ok(u) => {
+                            if self.get_type(&u) == Some(Type::Str) {
+                                if self.idx >= self.tokens.len() || !matches!(self.tokens[self.idx].0, Token::Greater) {
+                                    return Err(self.error(
+                                        EXPECTED_VAL,
+                                        start,
+                                        Some(self.location().end),
+                                        "Expected '>' in reqstr compiler instruction (reqstr<STRING>)",
+                                    ));
+                                }
+
+                                self.next_token();
+
+                                return Ok(AST::ReqStr { expr: Box::new(u) });
+                            }
+
+                            return Err(self.error(COMP_INST, start, Some(self.location().end), "Expected string value"));
+                        } 
+
+                        Err(e) => return Err(e)
+                    };
+                }
+
+                Token::ReqMutStr => {
+                    if self.idx >= self.tokens.len() || !matches!(self.tokens[self.idx].0, Token::Less) {
+                        return Err(self.error(
+                            EXPECTED_VAL,
+                            start,
+                            Some(self.location().end),
+                            "Expected '<' in reqmutstr compiler instruction (reqmutstr<INT>)",
+                        ));
+                    }
+
+                    self.next_token();
+
+                    let start = self.location().start;
+                    match self.parse_expr() {
+                        Ok(u) => {
+                            if self.get_type(&u) == Some(Type::Int) {
+                                if self.idx >= self.tokens.len() || !matches!(self.tokens[self.idx].0, Token::Greater) {
+                                    return Err(self.error(
+                                        EXPECTED_VAL,
+                                        start,
+                                        Some(self.location().end),
+                                        "Expected '>' in reqmutstr compiler instruction (reqmutstr<STRING>)",
+                                    ));
+                                }
+
+                                self.next_token();
+
+                                return Ok(AST::ReqMutStr { expr: Box::new(u) });
+                            }
+
+                            return Err(self.error(COMP_INST, start, Some(self.location().end), "Expected integer value"));
+                        } 
+
+                        Err(e) => return Err(e)
+                    };
                 }
 
                 _ => {
                     return Err(self.error(
                         EXPECTED_VAL,
                         start,
-                        Some(self.location()),
-                        "Expected unit (value, identifier, microcommand call, etc.)",
+                        Some(self.location().end),
+                        "Expected unit (value, identifier, function call, etc.)",
                     ))
                 }
             };
@@ -577,23 +659,25 @@ impl Parser {
         return Err(self.error(
             EXPECTED_VAL,
             start,
-            Some(self.location()),
-            "Expected unit (value, identifier, microcommand call, etc.)",
+            Some(self.location().end),
+            "Expected unit (value, identifier, function call, etc.)",
         ));
     }
 
     fn parse_term(&mut self) -> Result<AST, Error> {
-        let start = self.location();
+        let start = self.location().start;
         match self.parse_unit() {
             Ok(u) => {
                 let mut left = u.clone();
                 if matches!(
                     u,
-                    AST::MicroCall { .. }
+                    AST::FuncCall { .. }
                         | AST::BinOp { .. }
                         | AST::VarGet { .. }
                         | AST::UnaryOp { .. }
                         | AST::Value { .. }
+                        | AST::ReqStr { .. }
+                        | AST::ReqMutStr { .. }
                 ) {
                     while matches!(
                         self.get_token().unwrap_or(Token::Exit),
@@ -631,16 +715,18 @@ impl Parser {
     }
 
     fn parse_expr(&mut self) -> Result<AST, Error> {
-        let start = self.location();
+        let start = self.location().start;
         match self.parse_term() {
             Ok(t) => {
                 if matches!(
                     t,
-                    AST::MicroCall { .. }
+                    AST::FuncCall { .. }
                         | AST::BinOp { .. }
                         | AST::VarGet { .. }
                         | AST::UnaryOp { .. }
                         | AST::Value { .. }
+                        | AST::ReqStr { .. }
+                        | AST::ReqMutStr { .. }
                 ) {
                     let mut left = t;
 
@@ -679,14 +765,15 @@ impl Parser {
         }
     }
 
-    // So far: Macro calls, var = expr, ...
+    // So far: Proc calls, var = expr, ...
     fn parse_stmt(&mut self) -> Result<AST, Error> {
-        let start = self.location();
+        let start = self.location().start;
+
         if let Some(tok) = self.get_token() {
             match tok {
                 Token::ID(id) => {
                     self.next_token();
-                    if let Some(AST::MacroDef { name, params, body }) = self.find_macro(&id) {
+                    if let Some(AST::ProcDef { name, params, body }) = self.find_proc(&id) {
                         let mut args: Vec<Box<AST>> = Vec::new();
                         for param in &params {
                             match self.parse_expr() {
@@ -698,7 +785,7 @@ impl Parser {
                                             return Err(self.error(
                                                 TYPE_ERR,
                                                 start,
-                                                Some(self.location()),
+                                                Some(self.location().end),
                                                 &format!("Expected {}", param.1.to_string()),
                                             ));
                                         }
@@ -706,19 +793,19 @@ impl Parser {
                                         if let AST::VarGet { id } = arg {
                                             return Err(self.not_defined_err(
                                                 start,
-                                                Some(self.location()),
+                                                Some(self.location().end),
                                                 id,
                                             ));
                                         }
                                         return Err(self.error(
                                             TYPE_ERR,
                                             start,
-                                            Some(self.location()),
+                                            Some(self.location().end),
                                             "Unable to determine type of expression result",
                                         ));
                                     }
 
-                                    // say "Macros have no commas"
+                                    // say "Procs have no commas"
                                 }
 
                                 Err(e) => {
@@ -727,19 +814,15 @@ impl Parser {
                             }
                         }
 
-                        return Ok(AST::MacroCall {
+                        return Ok(AST::ProcCall {
                             name: name,
                             args: args,
                         });
                     }
                     if !matches!(self.get_token().unwrap_or(Token::Exit), Token::Eq) {
-                        let end = match self.get_token_span() {
-                            Some(span) => span.end,
-
-                            None => { self.location() }
-                        };
+                        let end = self.location().end;
                         
-                        return Err(self.error(FLOATING_ID, start, Some(end), &format!("Identifier '{}' not part of a statement or expression. Did you forget to define a macrocommand?", id)));
+                        return Err(self.error(FLOATING_ID, start, Some(end), &format!("Identifier '{}' not part of a statement or expression. Did you forget to define a procedure?", id)));
                     } else {
                         self.next_token();
                         match self.parse_expr() {
@@ -751,14 +834,14 @@ impl Parser {
                                     if let AST::VarGet { id } = expr {
                                         return Err(self.not_defined_err(
                                             start,
-                                            Some(self.location()),
+                                            Some(self.location().end),
                                             id,
                                         ));
                                     }
                                     return Err(self.error(
                                         TYPE_ERR,
                                         start,
-                                        Some(self.location()),
+                                        Some(self.location().end),
                                         "Unable to determine type of expression result",
                                     ));
                                 }
@@ -791,14 +874,14 @@ impl Parser {
                                 return Err(self.error(
                                     TYPE_ERR,
                                     start,
-                                    Some(self.location()),
+                                    Some(self.location().end),
                                     "Exit requires a integer",
                                 ));
                             } else {
                                 if let AST::VarGet { id } = expr {
-                                    return Err(self.not_defined_err(start, Some(self.location()), id));
+                                    return Err(self.not_defined_err(start, Some(self.location().end), id));
                                 }
-                                return Err(self.error(TYPE_ERR, start, Some(self.location()), "Unable to determine type of expression result; exit requires an INT result"));
+                                return Err(self.error(TYPE_ERR, start, Some(self.location().end), "Unable to determine type of expression result; exit requires an INT result"));
                             }
                         }
 
@@ -808,20 +891,26 @@ impl Parser {
                     };
                 }
 
+                Token::Asm(raw) => {
+                    self.next_token();
+
+                    return Ok(AST::ASM { body: raw });
+                }
+
                 _ => {
                     return Err(self.error(
                         EXPECTED_VAL,
                         start,
-                        Some(self.location()),
+                        Some(self.location().end),
                         "Expected statement",
                     ));
                 }
-            }
+            };
         } else {
             return Err(self.error(
                 EXPECTED_VAL,
                 start,
-                Some(self.location()),
+                Some(self.location().end),
                 "Expected a value while parsing statement, received none",
             ));
         }
@@ -829,7 +918,7 @@ impl Parser {
 
     pub fn parse(&mut self) -> Result<Vec<(AST, Span)>, Error> {
         while self.idx < self.tokens.len() {
-            let start = self.location();
+            let start = self.location().start;
             let stmt = match self.parse_stmt() {
                 Ok(ok) => ok,
                 Err(e) => {
@@ -837,16 +926,7 @@ impl Parser {
                 },
             };
 
-            self.program.push((stmt, Span::new(start, self.location())));
-        }
-
-        // Auto appends exit 0
-        if self.program.len() > 0
-            && !matches!(self.program[self.program.len() - 1].0, AST::Exit { .. })
-        {
-            self.program.push((AST::Exit {
-                code: Box::new(AST::Value { val: Value::Int(0) }),
-            }, Span::zero()))
+            self.program.push((stmt, Span::new(start, self.location().end)));
         }
 
         Ok(self.program.clone())
