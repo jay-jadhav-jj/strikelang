@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-pub const FILE_NOT_FOUND: u16 = 0;
+pub const FILE_ERR: u16 = 0;
 pub const UNEXPECTED_CHAR: u16 = 1;
 pub const ID_SYNTAX: u16 = 2;
 pub const NUM_SYNTAX: u16 = 3;
@@ -14,7 +14,9 @@ pub const BRACKET: u16 = 10;
 pub const NOT_IMPLEMENTED: u16 = 11;
 pub const ID_ERR: u16 = 12;
 pub const TYPE_ERR: u16 = 13;
-
+pub const COMP_ERR: u16 = 14;
+pub const ASM_SYNTAX: u16 = 15;
+pub const COMP_INST: u16 = 16;
 
 #[derive(Clone, Copy)]
 pub struct Span {
@@ -76,7 +78,7 @@ impl Error {
 
     fn get_error_name(error_code: &u16) -> String {
         match *error_code {
-            FILE_NOT_FOUND => String::from("FileNotFoundError"),
+            FILE_ERR => String::from("FileHandlingError"),
             UNEXPECTED_CHAR => String::from("UnexpectedCharError"),
             ID_SYNTAX => String::from("IdentifierSyntaxError"),
             NUM_SYNTAX => String::from("NumberSyntaxError"),
@@ -90,6 +92,9 @@ impl Error {
             NOT_IMPLEMENTED => String::from("NotImplementedError(Feature not implemented YET)"),
             ID_ERR => String::from("IdentifierError"),
             TYPE_ERR => String::from("TypeError"),
+            COMP_ERR => String::from("InternalCompilationError"),
+            ASM_SYNTAX => String::from("AssemblyBlockSyntaxError"),
+            COMP_INST => String::from("CompilerInstructionError"),
             _ => String::from("UnknownError"),
         }
     }
@@ -114,7 +119,7 @@ pub fn throw(error: Error) -> ! {
     
     std::eprintln!("{}", &error.content[error.location.unwrap_or(Span::zero()).range()]);
     std::eprintln!("{}", error.body);
-    std::eprintln!("Line {}, Index {}", &error.content[..error.location.unwrap_or(Span::zero()).start].matches('\n').count() + 2, error.location.unwrap_or(Span::zero()).start);
+    std::eprintln!("Line {}, Index {}", &error.content[..error.location.unwrap_or(Span::zero()).start].matches('\n').count() + 1, error.location.unwrap_or(Span::zero()).start);
 
     std::process::exit(error.code as i32);
 }
