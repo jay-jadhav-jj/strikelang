@@ -1,7 +1,6 @@
 // For linux 64 nasm
-
 use crate::{
-    parser::Type, strikeerror::{ASM_SYNTAX, COMP_ERR, COMP_INST, NOT_IMPLEMENTED},
+    parser::Type, strikeerror::{ASM_SYNTAX, COMP_ERR, COMP_INST, NOT_IMPLEMENTED, OVERFLOW_ERR, TYPE_ERR},
 };
 
 use super::*;
@@ -13,13 +12,16 @@ enum KnownVal {
         raw: String, // Track the actual value
         len: usize,
     },
+    Bool(bool),
 } // Values known at compile time
 
 #[derive(PartialEq, Clone)]
 enum DynamicVal {
     Int { data_addr: String },
 
-    Str { data_addr: String, len_addr: String },
+    Str { data_addr: String, len_addr: String, len: usize }, // len is to statically track for bufs
+
+    Bool { data_addr: String }, // a byte thats 0 or 1
 } // Values not known at compile time (e.g input() -> unknown string) OR values requested to be mutable
 
 #[derive(PartialEq, Clone)]
@@ -50,6 +52,7 @@ impl CompilerScope {
         }
     }
 }
+
 pub struct Compiler {
     filename: String,
     rawcode: String,
@@ -61,8 +64,8 @@ pub struct Compiler {
     bss: String,
     text: String,
 
-    reg_strs: Vec<(String, String)>, // Address, value
-    reg_mut_strs: Vec<(String, usize)>, // Address, capacity
+    reg_strs: Vec<(String, String)>,    // Address, value
+    reg_mut_str_bufs: Vec<(String, usize, bool)>, // Buffer address/name, capacity, in use/will be used again
 
     rodata_str_idx: usize,
     data_str_idx: usize,
@@ -77,12 +80,10 @@ impl Compiler {
             scopes: vec![CompilerScope::new()],
             rodata: String::new(),
             data: String::new(),
-            bss: String::from(
-                "\n\tibuf resq 1", // Buffer for evaluating int expressions
-            ),
+            bss: String::new(),
             text: String::new(),
             reg_strs: Vec::new(),
-            reg_mut_strs: Vec::new(),
+            reg_mut_str_bufs: Vec::new(),
             rodata_str_idx: 0,
             data_str_idx: 0,
         }
@@ -125,13 +126,12 @@ impl Compiler {
     // Keep updating this!!!
     fn get_type(&self, node: &AST) -> Option<Type> {
         match node {
-            AST::Value { val } => {
-                Some(match val {
-                    lexer::Value::Int(_) => Type::Int,
-                    lexer::Value::Str(_) => Type::Str,
-                    _ => Type::Int, // TEMP
-                })
-            }
+            AST::Value { val } => Some(match val {
+                lexer::Value::Int(_) => Type::Int,
+                lexer::Value::Str(_) => Type::Str,
+                lexer::Value::Bool(_) => Type::Bool,
+                _ => return None,
+            }),
 
             AST::VarGet { id } => {
                 for var in self.view_scope().vars {
@@ -147,6 +147,22 @@ impl Compiler {
                 let ltype = self.get_type(left);
                 let rtype = self.get_type(right);
 
+                match op {
+                    Token::CompareEq
+                    | Token::NotEq
+                    | Token::Not
+                    | Token::Greater
+                    | Token::Less
+                    | Token::GreatEq
+                    | Token::LessEq
+                    | Token::And
+                    | Token::Or => {
+                        return Some(Type::Bool);
+                    }
+
+                    _ => {}
+                };
+
                 if ltype == rtype {
                     return ltype;
                 }
@@ -158,72 +174,28 @@ impl Compiler {
                 if self.get_type(expr) == Some(Type::Int) {
                     return Some(Type::Int);
                 }
-                None
+
+                if self.get_type(expr) == Some(Type::Bool) {
+                    return Some(Type::Bool);
+                }
+
+                None // Strings shouldn't have unary operators
             }
 
-            AST::ReqStr { expr } => Some(Type::Str),
+            AST::ReqStr { .. } | AST::ReqMutStr { .. } | AST::DynaStr { .. } | AST::DynaAddr { .. }  => Some(Type::Str),
 
-            AST::ReqMutStr { expr } => Some(Type::Str),
+            AST::IsStatic { .. } => Some(Type::Bool),
 
             _ => None,
         }
     }
 
-    fn is_numeric_expr(&self, node: &AST) -> bool {
-        match node {
-            AST::Value { val } => match val {
-                lexer::Value::Int(_) => true,
-                _ => false,
-            },
-
-            AST::VarGet { id } => {
-                for var in self.view_scope().vars {
-                    if var.id == *id {
-                        return var.t == Type::Int;
-                    }
-                }
-
-                false
-            }
-
-            AST::UnaryOp { op, expr } => self.is_numeric_expr(expr),
-            AST::BinOp { left, op, right } => {
-                self.is_numeric_expr(left) && self.is_numeric_expr(right)
-            }
-
-            _ => false,
-        }
-    }
-
-    fn is_str_expr(&self, node: &AST) -> bool {
-        match node {
-            AST::Value { val } => match val {
-                lexer::Value::Str(_) => true,
-                _ => false,
-            },
-
-            AST::VarGet { id } => {
-                for var in self.view_scope().vars {
-                    if var.id == *id {
-                        return var.t == Type::Str;
-                    }
-                }
-
-                false
-            }
-
-            AST::BinOp { left, op, right } => self.is_str_expr(left) && self.is_str_expr(right),
-
-            _ => false,
-        }
-    }
-
-    fn eval_static_num(&self, node: &AST) -> i64 {
+    fn eval_static_num(&self, node: &AST, loc: Span) -> Result<i64, Error> {
         // Later add float support
         match node {
             AST::Value { val } => {
                 if let lexer::Value::Int(i) = val {
-                    return *i as i64;
+                    return Ok(*i as i64);
                 }
             }
 
@@ -232,46 +204,55 @@ impl Compiler {
                     match v.val {
                         Value::Known { val } => {
                             if let KnownVal::Int(i) = val {
-                                return i;
+                                return Ok(i);
                             }
                         }
 
-                        Value::Dynamic { val } => {
-                            return 0;
-                        }
+                        Value::Dynamic { val } => {} // Falls back to error
                     }
                 }
             }
 
             AST::UnaryOp { op, expr } => {
-                let val = self.eval_static_num(expr);
+                let val = self.eval_static_num(expr, loc)?;
 
                 match op {
-                    Token::Sub => return -val,
-                    _ => return val,
-                }
+                    Token::Sub => return Ok(-val),
+                    _ => {
+                        return Err(self.error(
+                            COMP_ERR,
+                            loc,
+                            "Invalid unary operation on static number",
+                        ))
+                    }
+                };
             }
 
             AST::BinOp { left, op, right } => {
-                let lval = self.eval_static_num(left);
-                let rval = self.eval_static_num(right);
+                let lval = self.eval_static_num(left, loc)?;
+                let rval = self.eval_static_num(right, loc)?;
 
-                match op {
-                    Token::Add => return lval + rval,
-                    Token::Sub => return lval - rval,
-                    Token::Mul => return lval * rval,
-                    Token::Div => return lval / rval, // Careful with div for now
-                    _ => return 0,
-                }
+                return Ok(match op {
+                    Token::Add => lval + rval,
+                    Token::Sub => lval - rval,
+                    Token::Mul => lval * rval,
+                    Token::Div => lval / rval, // Careful with div for now
+                    _ => {
+                        return Err(self.error(
+                            COMP_ERR,
+                            loc,
+                            "Unexpected numerical number operator",
+                        ))
+                    }
+                });
             }
 
-            _ => (),
-        }
-
-        0
+            _ => {}
+        };
+        return Err(self.error(COMP_ERR, loc, "Cannot resolve static integer value"));
     }
 
-    fn eval_static_str(&mut self, node: &AST, loc: Span) -> Result<String, Error> {
+    fn eval_static_str(&mut self, node: &AST, loc: Span, nomut: bool) -> Result<String, Error> {
         match node {
             AST::Value { val } => {
                 if let lexer::Value::Str(s) = val {
@@ -289,46 +270,263 @@ impl Compiler {
                         }
 
                         Value::Dynamic { val } => {
-                            return Err(self.error(COMP_ERR, loc, "Expected dynamic value"));
+                            return Err(self.error(COMP_ERR, loc, "Expected static value"));
                         }
                     }
                 }
             }
 
             AST::BinOp { left, op, right } => {
-                let lval = self.eval_static_str(left, loc)?;
-                let rval = self.eval_static_str(right, loc)?;
+                let lval = self.eval_static_str(left, loc, nomut)?;
+                let rval = self.eval_static_str(right, loc, nomut)?;
 
                 match op {
                     Token::Add => return Ok(lval + &rval),
-                    _ => return Err(self.error(COMP_ERR, loc, "+ is the only valid string-to-string operation"))
+                    _ => {
+                        return Err(self.error(
+                            COMP_ERR,
+                            loc,
+                            "+ is the only valid string-to-string operation",
+                        ))
+                    }
                 }
             }
 
             AST::ReqStr { expr } => {
-                let arg = self.eval_static_str(expr, loc)?;
+                if nomut {
+                    return Ok(String::from("_reg_"));
+                }
+                let arg = self.eval_static_str(expr, loc, nomut)?;
                 let addr = self.get_str(arg);
 
                 return Ok(addr);
             }
 
             AST::ReqMutStr { expr } => {
-                if self.is_static(expr) && self.is_numeric_expr(expr) {
-                    let val = self.eval_static_num(&expr);
+                if nomut {
+                    return Ok(String::from("_reg_"));
+                }
+                if self.is_static(expr) && self.get_type(expr) == Some(Type::Int) {
+                    let val = self.eval_static_num(&expr, loc)?;
                     if val < 4 {
-                        return Err(self.error(COMP_INST, loc, "Dynamic string allocations by reqmutstr have to be atleast 4 bytes"));
+                        return Err(self.error(
+                            COMP_INST,
+                            loc,
+                            "Dynamic string allocations by reqmutstr have to be atleast 4 bytes",
+                        ));
                     }
+
                     let addr = self.reqmutstr(val as usize);
                     return Ok(addr);
                 }
                 return Err(self.error(COMP_INST, loc, "Expected static integer"));
-            
+            }
+
+            AST::DynaAddr { expr } => {
+                if self.is_static(expr) {
+                    return Err(self.error(TYPE_ERR, loc, "dynaaddr expects a dynamic value; use isstatic{ANY} to check if a value is dynamic"));
+                }
+
+                if let Some(t) = self.get_type(expr) {
+                    match t {
+                        Type::Bool => {
+                            // TODO: eval_dynamic bool
+                        }
+
+                        Type::Int => {
+                            // TODO: eval dynamic int
+                        }
+
+                        Type::Str => {
+                            return Ok(self.eval_dynamic_str(expr, loc)?.0);
+                        }
+
+                        _ => {}
+                    }
+                }
             }
 
             _ => (),
-        }
+        };
 
         Err(self.error(COMP_ERR, loc, "Cannot resolve static string value"))
+    }
+
+    
+    fn eval_static_bool(&mut self, node: &AST, loc: Span) -> Result<bool, Error> {
+        match node {
+            AST::Value { val } => {
+                if let lexer::Value::Bool(b) = val {
+                    return Ok(*b);
+                }
+            }
+
+            AST::VarGet { id } => {
+                if let Some(v) = self.get_var(id.clone()) {
+                    match v.val {
+                        Value::Known { val } => {
+                            if let KnownVal::Bool(b) = val {
+                                return Ok(b);
+                            }
+                        }
+
+                        Value::Dynamic { val } => {
+                            return Err(self.error(COMP_ERR, loc, "Expected static value"));
+                        }
+                    }
+                }
+            }
+
+            AST::BinOp { left, op, right } => {
+                if *op == Token::NotEq {
+                    // TODO Add Int-Float conversion if self.get_type(left) == (Some(Type::Int) | Some(Type::Float))
+
+                    if self.get_type(left) == self.get_type(right) && self.get_type(left) != None {
+                        match self.get_type(left).unwrap() {
+                            Type::Bool => {
+                                let lval = self.eval_static_bool(left, loc)?;
+                                let rval = self.eval_static_bool(right, loc)?;
+
+                                return Ok(lval != rval);
+                            }
+
+                            Type::Int => {
+                                let lval = self.eval_static_num(left, loc)?;
+                                let rval = self.eval_static_num(right, loc)?;
+
+                                return Ok(lval != rval);
+                            }
+
+                            Type::Str => {
+                                let lval = self.eval_static_str(left, loc, false)?;
+                                let rval = self.eval_static_str(right, loc, false)?;
+
+                                return Ok(lval != rval);
+                            }
+
+                            _ => {}
+                        };
+                    }
+                    return Err(self.error(
+                        TYPE_ERR,
+                        loc,
+                        "!= is not supported for the given operand types",
+                    ));
+                }
+
+                if *op == Token::CompareEq {
+                    // TODO Add Int-Float conversion if self.get_type(left) == (Some(Type::Int) | Some(Type::Float))
+
+                    if self.get_type(left) == self.get_type(right) && self.get_type(left) != None {
+                        match self.get_type(left).unwrap() {
+                            Type::Bool => {
+                                let lval = self.eval_static_bool(left, loc)?;
+                                let rval = self.eval_static_bool(right, loc)?;
+
+                                return Ok(lval == rval);
+                            }
+
+                            Type::Int => {
+                                let lval = self.eval_static_num(left, loc)?;
+                                let rval = self.eval_static_num(right, loc)?;
+
+                                return Ok(lval == rval);
+                            }
+
+                            Type::Str => {
+                                let lval = self.eval_static_str(left, loc, false)?;
+                                let rval = self.eval_static_str(right, loc, false)?;
+
+                                return Ok(lval == rval);
+                            }
+
+                            _ => {}
+                        };
+                    }
+
+                    return Err(self.error(
+                        TYPE_ERR,
+                        loc,
+                        "== is not supported for the given operand types",
+                    ));
+                }
+
+                if self.get_type(left) == Some(Type::Bool)
+                    && self.get_type(right) == Some(Type::Bool)
+                {
+                    let lval = self.eval_static_bool(left, loc)?;
+                    let rval = self.eval_static_bool(right, loc)?;
+
+                    return Ok(match op {
+                        Token::And => lval && rval,
+
+                        Token::Or => lval || rval,
+
+                        _ => {
+                            return Err(self.error(
+                                TYPE_ERR,
+                                loc,
+                                "&&, &, ||, and | are the only valid bool-to-bool operators",
+                            ));
+                        }
+                    });
+                }
+
+                if self.get_type(left) == Some(Type::Int) && self.get_type(right) == Some(Type::Int)
+                {
+                    let lval = self.eval_static_num(left, loc)?;
+                    let rval = self.eval_static_num(right, loc)?;
+                    return Ok(match op {
+                        Token::GreatEq => {
+                            lval >= rval
+                        }
+    
+                        Token::Greater => {
+                            lval > rval
+                        }
+    
+                        Token::LessEq => {
+                            lval <= rval
+                        }
+    
+                        Token::Less => {
+                            lval < rval
+                        }
+    
+                        _ => {
+                            return Err(self.error(TYPE_ERR, loc, ">=, >, <=, and < are the only valid boolean operators for numerical values"))
+                        }
+                    });
+                }
+            }
+
+            AST::UnaryOp { op, expr } => {
+                if *op != Token::Not {
+                    return Err(self.error(
+                        TYPE_ERR,
+                        loc,
+                        "! is the only valid unary operator for booleans",
+                    ));
+                }
+
+                if self.get_type(&expr) != Some(Type::Bool) {
+                    return Err(self.error(TYPE_ERR, loc, "! only works on booleans"));
+                }
+
+                return Ok(!self.eval_static_bool(expr, loc)?);
+            }
+
+            AST::IsStatic { expr } => {
+                if self.get_type(expr) == None {
+                    return Err(self.error(TYPE_ERR, loc, "isstatic{} needs a valid value"));
+                }
+                return Ok(self.is_static(expr));
+            }
+
+            _ => (),
+        };
+
+        Err(self.error(COMP_ERR, loc, "Cannot resolve static boolean value"))
     }
 
     fn is_static(&self, node: &AST) -> bool {
@@ -348,9 +546,297 @@ impl Compiler {
             }
             AST::UnaryOp { op, expr } => self.is_static(expr),
             AST::BinOp { left, op, right } => self.is_static(left) && self.is_static(right),
-            AST::ReqStr { expr } | AST::ReqMutStr { expr } => true, // Req(Mut)Str returns same address, disregarding the value supplied
+            AST::ReqStr { .. } | AST::ReqMutStr { .. } | AST::IsStatic { .. } | AST::DynaAddr { .. } => true, // Req(Mut)Str returns same address, disregarding the value supplied
+
+            AST::If {
+                cond,
+                body,
+                branches,
+                elsebranch,
+            } => {
+                if !self.is_static(cond) {
+                    return false;
+                }
+
+                for stmt in body {
+                    if !self.is_static(&*stmt) {
+                        return false;
+                    }
+                }
+
+                for branch in branches {
+                    if !self.is_static(&*branch.0) {
+                        return false;
+                    }
+
+                    for stmt in &branch.1 {
+                        if !self.is_static(&*stmt) {
+                            return false;
+                        }
+                    }
+                }
+
+                if let Some(e) = elsebranch {
+                    for stmt in e {
+                        if !self.is_static(&*stmt) {
+                            return false;
+                        }
+                    }
+                }
+
+                return true;
+            }
             _ => false,
         }
+    }
+
+    // leave as mut since it uses eval_static_str
+    fn uses_addr(&mut self, node: &AST, addr: String, loc: Span) -> Result<bool, Error> {
+        match node {
+            AST::Exit { code } => {
+                return Ok(self.uses_addr(code, addr, loc)?);
+            }
+
+            AST::VarGet { id } => {
+                if let Some(var) = self.get_var(id.clone()) {
+                    if let Value::Dynamic { val } = var.val {
+                        match val {
+                            DynamicVal::Int { data_addr } => {
+                                return Ok(data_addr == addr);
+                            }
+
+                            DynamicVal::Str { data_addr, len_addr, len } => {
+                                return Ok(data_addr == addr || len_addr == addr) ;
+                            }
+
+                            DynamicVal::Bool { data_addr } => {
+                                return Ok(data_addr == addr);
+                            }
+                        };
+                    }
+                }
+            }
+
+            AST::BinOp { left, op, right } => {
+                return Ok(self.uses_addr(left, addr.clone(), loc)? || self.uses_addr(right, addr, loc)?);
+            }
+
+            AST::UnaryOp { op, expr } => {
+                return self.uses_addr(expr, addr.clone(), loc);
+            }
+
+            AST::If { cond, body, branches, elsebranch } => {
+                if self.uses_addr(cond, addr.clone(), loc)? {
+                    return Ok(true);
+                }
+
+                for stmt in body {
+                    if self.uses_addr(stmt, addr.clone(), loc)? {
+                        return Ok(true);
+                    }
+                }
+
+                for branch in branches {
+                    if self.uses_addr(&*branch.0, addr.clone(), loc)? {
+                        return Ok(true);
+                    }
+
+                    for stmt in &branch.1 {
+                        if self.uses_addr(&*stmt, addr.clone(), loc)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+
+                if let Some(e) = elsebranch {
+                    for stmt in e {
+                        if self.uses_addr(&*stmt, addr.clone(), loc)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+
+                return Ok(false);
+            }
+
+            AST::VarSet { id, expr } => {
+                return self.uses_addr(expr, addr, loc);
+            }
+
+            AST::DynaStr { str_addr, len} => {
+                if self.is_static(str_addr) {
+                    let val = self.eval_static_str(node, loc, true)?;
+
+                    if val == addr {
+                        return Ok(true);
+                    }
+                }
+            }
+
+            AST::DynaAddr { expr } => {
+                // If a buffer is used in an expression, then it shouldn't be considered used again cuz the buffer is gonna be reused
+                return Ok(self.uses_addr(expr, addr, loc)?);
+            }
+
+            _ => { }
+        }
+
+        Ok(false)
+    }
+
+    fn addr_used_again(&mut self, addr: String, stmt_idx: usize, loc: Span) -> Result<bool, Error> {
+        for i in stmt_idx + 1..self.ast.len() {
+            if self.is_static(&self.ast[i].0) {
+                continue;
+            }
+            if let Ok(true) = self.uses_addr(&self.ast[i].0.clone(), addr.clone(), loc) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn get_str_buf(&mut self, size: usize) -> String {
+        // Search through string buffers, if one is not in use then make its size atleast that needed and return it
+        for buf in self.reg_mut_str_bufs.iter_mut() {
+            if !buf.2 {
+                if buf.1 < size {
+                    buf.1 = size;
+                }
+                buf.2 = true; // in use now
+                return buf.0.clone();
+            }
+        }
+
+        let addr = format!("_sb{}", self.data_str_idx());
+        self.reg_mut_str_bufs.push((addr.clone(), size, true));
+
+        addr
+    }
+
+    fn eval_dynamic_str(&mut self, node: &AST, loc: Span) -> Result<(String, usize, String), Error> { // Returns address of result, length IN CHARS (*4 bytes) OR address of length
+        if self.is_static(node) { // Cuz dynamic str eval is recursive and values CAN be static
+            let res = self.eval_static_str(node, loc, false)?;
+            return Ok((self.get_str(res.clone()), res.len(), String::new()));
+        }
+
+        match node {
+            AST::DynaStr { str_addr, len} => {
+                // It is the developer's responsibility to make sure the addressses are valid
+                if self.is_static(str_addr) {
+                    if self.is_static(len) {
+                        let val = self.eval_static_num(len, loc)?;
+                        // TODO: Check if val is float
+                        if val < 0 {
+                            return Err(self.error(TYPE_ERR, loc, "dynastr requires positive integer length"));
+                        }
+                        return Ok((self.eval_static_str(str_addr, loc, false)?, val as usize, (self.eval_static_str(str_addr, loc, false)? + "_len")));
+                    }
+                    return Err(self.error(TYPE_ERR, loc, "dynastr requires a STATIC integer length;"));
+                }
+                return Err(self.error(TYPE_ERR, loc, "dynastr requires a STATIC string value;"));
+            }
+
+            AST::VarGet { id } => {
+                if let Some(var) = self.get_var(id.clone()) {
+                    match var.val {
+                        Value::Dynamic { val } => {
+                            if let DynamicVal::Str { data_addr, len_addr, len } = val {
+                                return Ok((data_addr, len, len_addr));
+                            }
+                            return Err(self.error(TYPE_ERR, loc, &format!("'{}' is not a string", id)));
+                        }
+
+                        Value::Known { val } => {
+                            if let KnownVal::Str { raw, len } = val {
+                                return Ok((self.get_str(raw), len, String::new()));
+                            }
+                            return Err(self.error(TYPE_ERR, loc, &format!("'{}' is not a string", id)));
+                        }
+                    }
+                }
+            }
+
+            AST::BinOp { left, op, right } => {
+                let lres = self.eval_dynamic_str(left, loc)?;
+                let rres = self.eval_dynamic_str(right, loc)?;
+
+                match *op {
+                    Token::Add => {
+                        let buf = self.get_str_buf(lres.1 + rres.1);
+                        
+                        self.text += "\n\tcld";
+                        self.text += &format!("\n\tmov rsi, {}", lres.0);
+                        self.text += &format!("\n\tmov rdi, {}", buf);
+                        if lres.2 == String::new() { // Length known at compile time/static
+                            self.text += &format!("\n\tmov rcx, {}", lres.1);
+                        } else {
+                            self.text += &format!("\n\tmov ecx, dword [{}]", lres.2);
+                        }
+                        self.text += "\n\trep movsb";
+
+                        self.text += &format!("\n\tmov rsi, {}", rres.0);
+                        if rres.2 == String::new() { // Length known at compile time/static
+                            self.text += &format!("\n\tmov rcx, {}", rres.1);
+                        } else {
+                            self.text += &format!("\n\tmov ecx, dword [{}]", rres.2);
+                        }
+                        self.text += "\n\trep movsb";
+                        let mut both_static = false;
+                        if lres.2 == String::new() {
+                            if rres.2 == String::new() {
+                                // Both static lengths
+                                self.text += &format!("\n\tmov dword [{}_len], {}", buf, lres.1 + rres.1);
+                                both_static = true;
+                            } else {
+                                // Static, dynamic
+                                
+                                self.text += &format!("\n\tmov eax, dword [{}]", rres.2);
+                                self.text += &format!("\n\tadd eax, {}", lres.1);
+                            }
+                        } else {
+                            if rres.2 == String::new() {
+                                // Dynamic, static
+                                self.text += &format!("\n\tmov eax, dword [{}]", lres.2);
+                                self.text += &format!("\n\tadd eax, {}", rres.1);
+                            } else {
+                                // Both dynamic lengths
+                                self.text += &format!("\n\tmov eax, dword [{}]", rres.2);
+                                self.text += &format!("\n\tadd eax, dword [{}]", lres.2);
+                            }
+                        }
+
+                        if !both_static {
+                            self.text += &format!("\n\tmov dword [{}_len], eax", buf);
+                        }
+                        self.text += "\n\t";
+
+                        return Ok((buf.clone(), lres.1 + rres.1 as usize, format!("{}_len", buf)));
+                    }
+
+                    _ => {
+                        return Err(self.error(TYPE_ERR, loc, "+ (concatenate) is the only valid string-to-string operation"));
+                    }
+                };
+            }
+
+            _ => { }
+        };
+        
+        Err(self.error(COMP_ERR, loc, "Cannot resolve dynamic string value"))
+    }
+
+    fn update_str_bufs(&mut self, stmt_idx: usize, loc: Span) -> Result<(), Error> {
+        let mut bufs = self.reg_mut_str_bufs.clone();
+
+        for buf in bufs.iter_mut() {
+            if buf.2 {
+                buf.2 = self.addr_used_again(buf.0.clone(), stmt_idx, loc)?;
+            }
+        }
+        self.reg_mut_str_bufs = bufs;
+
+        Ok(())
     }
 
     fn set_var(&mut self, var: Variable) {
@@ -381,9 +867,8 @@ impl Compiler {
         let address = format!("_ms{}", self.data_str_idx());
 
         self.bss += &format!("\n\t{} resb {}", address, bufsize);
-        self.bss += &format!("\n\t{}_len resq 1", address);
+        self.bss += &format!("\n\t{}_len resd 1", address);
 
-        self.reg_mut_strs.push((address.clone(), bufsize));
         address
     }
 
@@ -394,7 +879,7 @@ impl Compiler {
                     match t {
                         Type::Int => {
                             if self.is_static(&expr) {
-                                let val = self.eval_static_num(&expr);
+                                let val = self.eval_static_num(&expr, loc)?;
 
                                 self.set_var(Variable {
                                     id: id.clone(),
@@ -409,7 +894,7 @@ impl Compiler {
 
                         Type::Str => {
                             if self.is_static(&expr) {
-                                let val = self.eval_static_str(expr, loc)?;
+                                let val = self.eval_static_str(expr, loc, false)?;
 
                                 self.set_var(Variable {
                                     id: id.clone(),
@@ -423,6 +908,26 @@ impl Compiler {
                                 });
                                 return Ok(());
                             }
+                            
+                            let (addr, len, len_addr) = self.eval_dynamic_str(&expr, loc)?;
+                            
+                            self.set_var(Variable { id: id.clone(), val: Value::Dynamic { val: DynamicVal::Str { data_addr: addr, len_addr: len_addr, len: len } }, t });
+                            return Ok(());
+                        }
+
+                        Type::Bool => {
+                            if self.is_static(&expr) {
+                                let val = self.eval_static_bool(expr, loc)?;
+
+                                self.set_var(Variable {
+                                    id: id.clone(),
+                                    val: Value::Known {
+                                        val: KnownVal::Bool(val),
+                                    },
+                                    t: Type::Bool,
+                                });
+                                return Ok(());
+                            }
                         }
 
                         _ => return Err(Error::placeholder()),
@@ -430,7 +935,7 @@ impl Compiler {
                 }
 
                 None => {}
-            }
+            };
         };
 
         Err(self.error(
@@ -470,11 +975,9 @@ impl Compiler {
     }
 
     fn compile_exit(&mut self, node: AST, loc: Span) -> Result<(), Error> {
-        // Don't do type checking again, parser already does it.
-        // Actually maybe do cuz idk what eval can return
         if let AST::Exit { code } = node {
-            if self.is_numeric_expr(&*code) && self.is_static(&*code) {
-                let val = self.eval_static_num(&*code);
+            if self.get_type(&*code) == Some(Type::Int) && self.is_static(&*code) {
+                let val = self.eval_static_num(&*code, loc)?;
 
                 self.text += "\n\tmov rax, 60";
                 self.text += &format!("\n\tmov rdi, {}", val.to_string());
@@ -550,22 +1053,87 @@ impl Compiler {
         Err(self.error(COMP_ERR, loc, "Unable to compile inline assembly block"))
     }
 
+    fn compile_if(&mut self, node: AST, loc: Span) -> Result<(), Error> {
+        if let AST::If {
+            cond,
+            body,
+            branches,
+            elsebranch,
+        } = node
+        {
+            if self.get_type(&cond) == Some(Type::Bool) {
+                for b in &branches {
+                    if self.get_type(&b.0) != Some(Type::Bool) {
+                        return Err(self.error(
+                            TYPE_ERR,
+                            loc,
+                            "Elif condition must evaluate to a valid boolean",
+                        ));
+                    }
+                }
+
+                if self.is_static(&cond) {
+                    let val = self.eval_static_bool(&cond, loc)?;
+
+                    if val {
+                        self.scopes.push(CompilerScope::new());
+                        for stmt in &body {
+                            self.compile_stmt(*stmt.clone(), loc)?;
+                        }
+                        self.scopes.remove(self.scopes.len() - 1);
+                        return Ok(());
+                    }
+
+                    for branch in branches {
+                        if self.is_static(&branch.0) {
+                            let val = self.eval_static_bool(&branch.0, loc)?;
+
+                            if val {
+                                self.scopes.push(CompilerScope::new());
+                                for stmt in branch.1 {
+                                    self.compile_stmt(*stmt.clone(), loc)?;
+                                }
+                                self.scopes.remove(self.scopes.len() - 1);
+                                return Ok(());
+                            }
+                        } else {
+                            // TODO: dynamic elifs
+                        }
+                    }
+
+                    if let Some(stmts) = elsebranch {
+                        self.scopes.push(CompilerScope::new());
+                        for stmt in stmts {
+                            self.compile_stmt(*stmt.clone(), loc)?;
+                        }
+                        self.scopes.remove(self.scopes.len() - 1);
+                    }
+
+                    return Ok(());
+                }
+
+                // TODO: make dynamic ifs
+            } else {
+                return Err(self.error(
+                    TYPE_ERR,
+                    loc,
+                    "If condition must evaluate to a valid boolean",
+                ));
+            }
+        }
+
+        Err(self.error(COMP_ERR, loc, "Unable to compile if statement"))
+    }
+
     fn compile_stmt(&mut self, stmt: AST, span: Span) -> Result<(), Error> {
         match stmt {
-            AST::Exit { .. } => match self.compile_exit(stmt, span) {
-                Ok(_) => Ok(()),
-                Err(e) => return Err(e),
-            },
+            AST::Exit { .. } => return self.compile_exit(stmt, span),
 
-            AST::VarSet { .. } => match self.compile_set_var(stmt, span) {
-                Ok(_) => Ok(()),
-                Err(e) => return Err(e),
-            },
+            AST::VarSet { .. } => return self.compile_set_var(stmt, span),
 
-            AST::ASM { .. } => match self.compile_asmblock(stmt, span) {
-                Ok(_) => Ok(()),
-                Err(e) => return Err(e),
-            },
+            AST::ASM { .. } => return self.compile_asmblock(stmt, span),
+
+            AST::If { .. } => return self.compile_if(stmt, span),
 
             _ => {
                 return Err(self.error(NOT_IMPLEMENTED, span, "Can't compile this statement"));
@@ -575,10 +1143,11 @@ impl Compiler {
 
     pub fn compile(&mut self) -> Result<String, Error> {
         // Clone takes performance but its a compiler so who cares
-        for (stmt, span) in self.ast.clone() {
-            if let Err(e) = self.compile_stmt(stmt, span) {
+        for (idx, (stmt, span)) in self.ast.clone().iter().enumerate() {
+            if let Err(e) = self.compile_stmt(stmt.clone(), *span) {
                 return Err(e);
             }
+            self.update_str_bufs(idx, *span)?;
         }
 
         self.compile_stmt(
@@ -595,12 +1164,16 @@ impl Compiler {
         ret += ";compiled with strikelang ;)";
         ret += "\nsection .rodata";
         // Special characters
-            ret += "\n\tnewln db 10";
-            ret += "\n\tnewln_len equ $ - newln";
+        ret += "\n\tnewln db 10";
+        ret += "\n\tnewln_len equ $ - newln";
         ret += &self.rodata;
         ret += "\nsection .data";
         ret += &self.data;
         ret += "\nsection .bss";
+        for buf in &self.reg_mut_str_bufs {
+            self.bss += &format!("\n\t{} resb {}", buf.0, buf.1);
+            self.bss += &format!("\n\t{}_len resd 1", buf.0);
+        }
         ret += &self.bss;
         ret += "\nsection .text\n\tglobal _start\n\t_start:";
         ret += &self.text;
