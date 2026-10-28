@@ -17,6 +17,8 @@ pub const TYPE_ERR: u16 = 13;
 pub const COMP_ERR: u16 = 14;
 pub const ASM_SYNTAX: u16 = 15;
 pub const COMP_INST: u16 = 16;
+pub const IF_SYNTAX: u16 = 17;
+pub const OVERFLOW_ERR: u16 = 18;
 
 #[derive(Clone, Copy)]
 pub struct Span {
@@ -92,9 +94,10 @@ impl Error {
             NOT_IMPLEMENTED => String::from("NotImplementedError(Feature not implemented YET)"),
             ID_ERR => String::from("IdentifierError"),
             TYPE_ERR => String::from("TypeError"),
-            COMP_ERR => String::from("InternalCompilationError"),
+            COMP_ERR => String::from("CompilationError"),
             ASM_SYNTAX => String::from("AssemblyBlockSyntaxError"),
             COMP_INST => String::from("CompilerInstructionError"),
+            IF_SYNTAX => String::from("IfStatementSyntaxError"),
             _ => String::from("UnknownError"),
         }
     }
@@ -112,14 +115,14 @@ impl Error {
 }
 
 pub fn throw(error: Error) -> ! {
+    eprintln!("{}", &error.content[error.location.unwrap_or(Span::zero()).range()]);
     eprintln!(
         "{:<21}(code {}) ({})",
         error.name, error.code, error.fname
     );
     
-    std::eprintln!("{}", &error.content[error.location.unwrap_or(Span::zero()).range()]);
-    std::eprintln!("{}", error.body);
-    std::eprintln!("Line {}, Index {}", &error.content[..error.location.unwrap_or(Span::zero()).start].matches('\n').count() + 1, error.location.unwrap_or(Span::zero()).start);
+    eprintln!("{}", error.body);
+    &eprintln!("Line {}, Index {}", &error.content[..error.location.unwrap_or(Span::zero()).start].matches('\n').count() + 1, error.location.unwrap_or(Span::zero()).start);
 
     std::process::exit(error.code as i32);
 }
