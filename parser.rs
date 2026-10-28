@@ -1,5 +1,6 @@
 use super::lexer::{Token, Value};
 use super::strikeerror::*;
+use std::fmt;
 
 // Native JCMDLANG types; JUST TYPES not values
 #[derive(Clone, PartialEq, Debug)]
@@ -7,22 +8,27 @@ pub enum Type {
     Int,
     Str,
     List(Vec<Type>),
+    Bool,
 }
 
-impl Type {
-    pub fn to_string(&self) -> String {
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Type::Int => String::from("INT"),
-            Type::Str => String::from("STR"),
+            Type::Int => write!(f, "INT"),
+            Type::Str => write!(f, "STR"),
             Type::List(types) => {
-                let mut ret = String::from("LIST(");
+                write!(f, "LIST(")?;
 
-                for t in types {
-                    ret += &t.to_string();
+                for (i, ty) in types.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{ty}")?;
                 }
 
-                ret + ")"
+                write!(f, ")")
             }
+            Type::Bool => write!(f, "BOOL"),
         }
     }
 }
@@ -38,6 +44,9 @@ impl Type {
                 matches!(v, Value::Str(..))
             }
 
+            Type::Bool => {
+                matches!(v, Value::Bool(..))
+            }
             _ => false,
         }
     }
@@ -96,172 +105,29 @@ pub enum AST {
         val: Value,
     },
     ReqStr {
-        expr: Box<AST>
+        expr: Box<AST>,
     },
     ReqMutStr {
-        expr: Box<AST>
+        expr: Box<AST>,
+    },
+    If {
+        cond: Box<AST>,
+        body: Vec<Box<AST>>,                      // main if body
+        branches: Vec<(Box<AST>, Vec<Box<AST>>)>, // elifs
+        elsebranch: Option<Vec<Box<AST>>>,
+    },
+    IsStatic {
+        expr: Box<AST>, // Can take any value (e.g isstatic<1 + 2> OR isstatic<"Static string">)
+    },
+    DynaStr {
+        str_addr: Box<AST>, // Developer must make sure addr + _len is where length is stored
+        len: Box<AST>,      // Static len of string
+        // Reason: asm needs _len and compiler buffers need to know size at compile time
+    },
+    DynaAddr {
+        expr: Box<AST>,
     },
 }
-
-
-use std::fmt;
-
-impl fmt::Display for Type {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Type::Int => write!(f, "INT"),
-            Type::Str => write!(f, "STR"),
-            Type::List(types) => {
-                write!(f, "LIST(")?;
-
-                for (i, ty) in types.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{ty}")?;
-                }
-
-                write!(f, ")")
-            }
-        }
-    }
-}
-
-impl fmt::Display for AST {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AST::VarSet { id, expr } => {
-                write!(f, "Set({id}, {expr})")
-            }
-
-            AST::VarGet { id } => {
-                write!(f, "Get({id})")
-            }
-
-            AST::BinOp { left, op, right } => {
-                write!(f, "BinOp({op:?}, {left}, {right})")
-            }
-
-            AST::UnaryOp { op, expr } => {
-                write!(f, "UnaryOp({op:?}, {expr})")
-            }
-
-            AST::ForLoop { item_id, list, body } => {
-                write!(f, "ForLoop(item={item_id:?}, list={list}, body=[")?;
-
-                for (i, stmt) in body.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{stmt}")?;
-                }
-
-                write!(f, "])")
-            }
-
-            AST::Exit { code } => {
-                write!(f, "Exit({code})")
-            }
-
-            AST::ASM { body } => {
-                write!(f, "ASM({body})")
-            }
-
-            AST::ProcDef { name, params, body } => {
-                write!(f, "ProcDef({name}, params=[")?;
-
-                for (i, (param, ty)) in params.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{param}: {ty}")?;
-                }
-
-                write!(f, "], body=[")?;
-
-                for (i, stmt) in body.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{stmt}")?;
-                }
-
-                write!(f, "])")
-            }
-
-            AST::FuncDef {
-                name,
-                params,
-                body,
-                rettype,
-            } => {
-                write!(f, "FuncDef({name}, params=[")?;
-
-                for (i, (param, ty)) in params.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{param}: {ty}")?;
-                }
-
-                write!(f, "], returns={rettype}, body=[")?;
-
-                for (i, stmt) in body.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{stmt}")?;
-                }
-
-                write!(f, "])")
-            }
-
-            AST::ProcCall { name, args } => {
-                write!(f, "ProcCall({name}, args=[")?;
-
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{arg}")?;
-                }
-
-                write!(f, "])")
-            }
-
-            AST::FuncCall { name, args } => {
-                write!(f, "FuncCall({name}, args=[")?;
-
-                for (i, arg) in args.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{arg}")?;
-                }
-
-                write!(f, "])")
-            }
-
-            AST::Value { val } => {
-                match val {
-                    Value::Int(v) => write!(f, "Int({v})"),
-                    Value::Str(v) => write!(f, "Str({v:?})"),
-                    Value::Float(v) => write!(f, "Float({v})"),
-                }
-            }
-
-            AST::ReqStr { expr } => {
-                write!(f, "ReqStr({expr})")
-            }
-
-            AST::ReqMutStr { expr } => {
-                write!(f, "ReqMutStr({expr})")
-            }
-        }
-    }
-}
-
-
 
 #[derive(Clone)]
 struct ParserScope {
@@ -297,16 +163,27 @@ impl Parser {
             idx: 0,
             scope: ParserScope::new(),
             filename: fname,
-            raw: rawcode
+            raw: rawcode,
         }
     }
 
     fn error(&self, code: u16, start: usize, end: Option<usize>, msg: &str) -> Error {
-        Error::from_code(self.filename.clone(), self.raw.clone(), &code, Some(Span::new(start, end.unwrap_or(self.location().end))), msg)
+        Error::from_code(
+            self.filename.clone(),
+            self.raw.clone(),
+            &code,
+            Some(Span::new(start, end.unwrap_or(self.location().end))),
+            msg,
+        )
     }
 
     fn not_defined_err(&self, start: usize, end: Option<usize>, id: String) -> Error {
-        Error::not_defined_err(self.filename.clone(), self.raw.clone(), Span::new(start, end.unwrap_or(self.location().end)), &id)
+        Error::not_defined_err(
+            self.filename.clone(),
+            self.raw.clone(),
+            Span::new(start, end.unwrap_or(self.location().end)),
+            &id,
+        )
     }
 
     fn find_proc(&self, procname: &str) -> Option<AST> {
@@ -350,7 +227,8 @@ impl Parser {
     }
 
     fn location(&self) -> Span {
-        self.get_token_span().unwrap_or(self.tokens[self.tokens.len() - 1].1)
+        self.get_token_span()
+            .unwrap_or(self.tokens[self.tokens.len() - 1].1)
     }
 
     fn get_token(&self) -> Option<Token> {
@@ -381,7 +259,8 @@ impl Parser {
         match node {
             AST::BinOp { right, op, left } => {
                 if (self.get_type(&*right).is_none() || self.get_type(&*left).is_none())
-                    || self.get_type(&*right) != self.get_type(&*left) // Operands must be the same type
+                    || self.get_type(&*right) != self.get_type(&*left)
+                // Operands must be the same type
                 {
                     return None;
                 }
@@ -412,6 +291,8 @@ impl Parser {
 
                     Value::Str(_) => Some(Type::Str),
 
+                    Value::Bool(_) => Some(Type::Bool),
+
                     Value::Float(_) => None,
                 }
             }
@@ -432,10 +313,16 @@ impl Parser {
                 }
             }
 
-            AST::ReqStr { expr } | AST::ReqMutStr { expr } => {
+            AST::ReqStr { .. }
+            | AST::ReqMutStr { .. }
+            | AST::DynaStr { .. }
+            | AST::DynaAddr { .. } => {
                 return Some(Type::Str);
             }
 
+            AST::IsStatic { expr } => {
+                return Some(Type::Bool);
+            }
             _ => None,
         }
     }
@@ -458,9 +345,23 @@ impl Parser {
                     }
                 }
 
+                // Same code as unary op, so !!!!!!!!true works
+                Token::Not => {
+                    return match self.parse_unit() {
+                        Ok(unit) => {
+                            return Ok(AST::UnaryOp {
+                                op: Token::Not,
+                                expr: Box::new(unit),
+                            })
+                        }
+
+                        Err(e) => Err(e),
+                    }
+                }
+
                 // Brackets 10 * (10 + 1) -> 10 * 11 Yay
                 Token::LParen => {
-                    return match self.parse_expr() {
+                    return match self.parse_or() {
                         Ok(expr) => {
                             if let Some(Token::RParen) = self.next_token() {
                                 return Ok(expr);
@@ -507,7 +408,7 @@ impl Parser {
 
                             for p in &params {
                                 let start = self.location().start;
-                                match self.parse_expr() {
+                                match self.parse_or() {
                                     Ok(arg) => {
                                         if let Some(t) = self.get_type(&arg) {
                                             if t == p.1 {
@@ -562,7 +463,12 @@ impl Parser {
                                 ));
                             }
                         } else {
-                            return Err(self.error(ID_ERR, start, None, "Expected function call ()"));
+                            return Err(self.error(
+                                ID_ERR,
+                                start,
+                                None,
+                                "Expected function call ()",
+                            ));
                         }
                     } else {
                         if self.find_var(&id).is_none() {
@@ -573,27 +479,31 @@ impl Parser {
                 }
 
                 Token::ReqStr => {
-                    if self.idx >= self.tokens.len() || !matches!(self.tokens[self.idx].0, Token::Less) {
+                    if self.idx >= self.tokens.len()
+                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                    {
                         return Err(self.error(
                             EXPECTED_VAL,
                             start,
                             Some(self.location().end),
-                            "Expected '<' in reqstr compiler instruction (reqstr<STRING>)",
+                            "Expected '{' in reqstr compiler instruction (reqstr{STATIC STRING})",
                         ));
                     }
 
                     self.next_token();
 
                     let start = self.location().start;
-                    match self.parse_expr() {
+                    match self.parse_or() {
                         Ok(u) => {
                             if self.get_type(&u) == Some(Type::Str) {
-                                if self.idx >= self.tokens.len() || !matches!(self.tokens[self.idx].0, Token::Greater) {
+                                if self.idx >= self.tokens.len()
+                                    || !matches!(self.tokens[self.idx].0, Token::LCurly)
+                                {
                                     return Err(self.error(
                                         EXPECTED_VAL,
                                         start,
                                         Some(self.location().end),
-                                        "Expected '>' in reqstr compiler instruction (reqstr<STRING>)",
+                                        "Expected '}' in reqstr compiler instruction (reqstr{STATIC STRING})",
                                     ));
                                 }
 
@@ -602,35 +512,44 @@ impl Parser {
                                 return Ok(AST::ReqStr { expr: Box::new(u) });
                             }
 
-                            return Err(self.error(COMP_INST, start, Some(self.location().end), "Expected string value"));
-                        } 
+                            return Err(self.error(
+                                COMP_INST,
+                                start,
+                                Some(self.location().end),
+                                "Expected string value",
+                            ));
+                        }
 
-                        Err(e) => return Err(e)
+                        Err(e) => return Err(e),
                     };
                 }
 
                 Token::ReqMutStr => {
-                    if self.idx >= self.tokens.len() || !matches!(self.tokens[self.idx].0, Token::Less) {
+                    if self.idx >= self.tokens.len()
+                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                    {
                         return Err(self.error(
                             EXPECTED_VAL,
                             start,
                             Some(self.location().end),
-                            "Expected '<' in reqmutstr compiler instruction (reqmutstr<INT>)",
+                            "Expected '{' in reqmutstr compiler instruction (reqmutstr{STATIC INT})",
                         ));
                     }
 
                     self.next_token();
 
                     let start = self.location().start;
-                    match self.parse_expr() {
+                    match self.parse_or() {
                         Ok(u) => {
                             if self.get_type(&u) == Some(Type::Int) {
-                                if self.idx >= self.tokens.len() || !matches!(self.tokens[self.idx].0, Token::Greater) {
+                                if self.idx >= self.tokens.len()
+                                    || !matches!(self.tokens[self.idx].0, Token::LCurly)
+                                {
                                     return Err(self.error(
                                         EXPECTED_VAL,
                                         start,
                                         Some(self.location().end),
-                                        "Expected '>' in reqmutstr compiler instruction (reqmutstr<STRING>)",
+                                        "Expected '}' in reqmutstr compiler instruction (reqmutstr{STATIC INT})",
                                     ));
                                 }
 
@@ -639,10 +558,165 @@ impl Parser {
                                 return Ok(AST::ReqMutStr { expr: Box::new(u) });
                             }
 
-                            return Err(self.error(COMP_INST, start, Some(self.location().end), "Expected integer value"));
-                        } 
+                            return Err(self.error(
+                                COMP_INST,
+                                start,
+                                Some(self.location().end),
+                                "Expected integer value",
+                            ));
+                        }
 
-                        Err(e) => return Err(e)
+                        Err(e) => return Err(e),
+                    };
+                }
+
+                Token::IsStatic => {
+                    if self.idx >= self.tokens.len()
+                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                    {
+                        return Err(self.error(
+                            EXPECTED_VAL,
+                            start,
+                            Some(self.location().end),
+                            "Expected '{' in isstatic compiler instruction (isstatic{VALUE})",
+                        ));
+                    }
+
+                    self.next_token();
+
+                    let start = self.location().start;
+                    match self.parse_or() {
+                        Ok(u) => {
+                            if self.idx >= self.tokens.len()
+                                || !matches!(self.tokens[self.idx].0, Token::LCurly)
+                            {
+                                return Err(self.error(
+                                    EXPECTED_VAL,
+                                    start,
+                                    Some(self.location().end),
+                                    "Expected '}' in isstatic compiler instruction (isstatic{VALUE})",
+                                ));
+                            }
+
+                            self.next_token();
+
+                            return Ok(AST::IsStatic { expr: Box::new(u) });
+                        }
+
+                        Err(e) => return Err(e),
+                    };
+                }
+
+                Token::DynaStr => {
+                    if self.idx >= self.tokens.len()
+                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                    {
+                        return Err(self.error(
+                            EXPECTED_VAL,
+                            start,
+                            Some(self.location().end),
+                            "Expected '{' in dynastr compiler instruction (dynastr{ADDRESS, LEN})",
+                        ));
+                    }
+
+                    self.next_token();
+
+                    let start = self.location().start;
+                    match self.parse_or() {
+                        Ok(straddr) => {
+                            // Now parse for a comma and then get another int
+                            if let Some(Type::Str) = self.get_type(&straddr) {
+                                if self.idx >= self.tokens.len() || self.next_token() != Some(Token::Comma) {
+                                    return Err(self.error(
+                                        EXPECTED_VAL,
+                                        start,
+                                        Some(self.location().end),
+                                        "Expected ',' in dynastr compiler instruction (dynastr{ADDRESS, LEN})",
+                                    ));
+                                }
+                                if let Ok(len) = self.parse_or() {
+                                    if let Some(Type::Int) = self.get_type(&len) {
+                                        if self.idx >= self.tokens.len()
+                                            || !matches!(self.get_token().unwrap(), Token::LCurly)
+                                        {
+                                            return Err(self.error(
+                                                EXPECTED_VAL,
+                                                start,
+                                                Some(self.location().end),
+                                                "Expected '}' in dynastr compiler instruction (dynastr{ADDRESS, LEN})",
+                                            ));
+                                        }
+
+                                        self.next_token();
+
+                                        return Ok(AST::DynaStr {
+                                            str_addr: Box::new(straddr),
+                                            len: Box::new(len),
+                                        });
+                                    } else {
+                                        return Err(self.error(
+                                            TYPE_ERR,
+                                            start,
+                                            Some(self.location().end),
+                                            "Expected integer value for dynastr compiler instruction (dynastr{ADDRESS, LEN})",
+                                        ));
+                                    }
+                                } else {
+                                    return Err(self.error(
+                                        EXPECTED_VAL,
+                                        start,
+                                        Some(self.location().end),
+                                        "Expected integer value for dynastr compiler instruction (dynastr{ADDRESS, LEN})",
+                                    ));
+                                }
+                            } else {
+                                return Err(self.error(
+                                    TYPE_ERR,
+                                    start,
+                                    Some(self.location().end),
+                                    "Expected string value for dynastr compiler instruction (dynastr{ADDRESS})",
+                                ));
+                            }
+                        }
+
+                        Err(e) => return Err(e),
+                    };
+                }
+
+                Token::DynaAddr => {
+                    if self.idx >= self.tokens.len()
+                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                    {
+                        return Err(self.error(
+                            EXPECTED_VAL,
+                            start,
+                            Some(self.location().end),
+                            "Expected '<' in dynaaddr compiler instruction (dynaaddr{DYNAMIC VALUE})",
+                        ));
+                    }
+
+                    self.next_token();
+
+                    let start = self.location().start;
+                    match self.parse_or() {
+                        Ok(u) => {
+                            if self.idx >= self.tokens.len()
+                                || !matches!(self.tokens[self.idx].0, Token::LCurly)
+                            {
+                                return Err(self.error(
+                                    EXPECTED_VAL,
+                                    start,
+                                    Some(self.location().end),
+                                    "Expected '}' in dynaaddr compiler instruction (dynaaddr{DYNAMIC VALUE})",
+                                ));
+                            }
+
+                            self.next_token();
+
+                            return Ok(AST::DynaAddr { expr: Box::new(u) });
+                        }
+
+                        Err(e) => return Err(e),
                     };
                 }
 
@@ -656,6 +730,7 @@ impl Parser {
                 }
             };
         }
+
         return Err(self.error(
             EXPECTED_VAL,
             start,
@@ -664,21 +739,28 @@ impl Parser {
         ));
     }
 
+    fn valid_operand(node: &AST) -> bool {
+        matches!(
+            node,
+            AST::FuncCall { .. }
+                | AST::BinOp { .. }
+                | AST::VarGet { .. }
+                | AST::UnaryOp { .. }
+                | AST::Value { .. }
+                | AST::ReqStr { .. }
+                | AST::ReqMutStr { .. }
+                | AST::IsStatic { .. }
+                | AST::DynaStr { .. }
+                | AST::DynaAddr { .. }
+        )
+    }
+
     fn parse_term(&mut self) -> Result<AST, Error> {
         let start = self.location().start;
         match self.parse_unit() {
             Ok(u) => {
                 let mut left = u.clone();
-                if matches!(
-                    u,
-                    AST::FuncCall { .. }
-                        | AST::BinOp { .. }
-                        | AST::VarGet { .. }
-                        | AST::UnaryOp { .. }
-                        | AST::Value { .. }
-                        | AST::ReqStr { .. }
-                        | AST::ReqMutStr { .. }
-                ) {
+                if Parser::valid_operand(&u) {
                     while matches!(
                         self.get_token().unwrap_or(Token::Exit),
                         Token::Mul | Token::Div
@@ -702,12 +784,7 @@ impl Parser {
                     return Ok(left);
                 }
 
-                return Err(self.error(
-                    EXPECTED_VAL,
-                    start,
-                    None,
-                    "Expected a term",
-                ));
+                return Err(self.error(EXPECTED_VAL, start, None, "Expected a term"));
             }
 
             Err(e) => Err(e),
@@ -718,16 +795,7 @@ impl Parser {
         let start = self.location().start;
         match self.parse_term() {
             Ok(t) => {
-                if matches!(
-                    t,
-                    AST::FuncCall { .. }
-                        | AST::BinOp { .. }
-                        | AST::VarGet { .. }
-                        | AST::UnaryOp { .. }
-                        | AST::Value { .. }
-                        | AST::ReqStr { .. }
-                        | AST::ReqMutStr { .. }
-                ) {
+                if Parser::valid_operand(&t) {
                     let mut left = t;
 
                     while matches!(
@@ -753,12 +821,149 @@ impl Parser {
                     return Ok(left);
                 }
 
-                return Err(self.error(
-                    EXPECTED_VAL,
-                    start,
-                    None,
-                    "Expected an expression",
-                ));
+                return Err(self.error(EXPECTED_VAL, start, None, "Expected an expression"));
+            }
+
+            Err(e) => Err(e),
+        }
+    }
+
+    fn parse_comp(&mut self) -> Result<AST, Error> {
+        let start = self.location().start;
+        match self.parse_expr() {
+            Ok(e) => {
+                if Parser::valid_operand(&e) {
+                    let mut left = e;
+
+                    while matches!(
+                        self.get_token().unwrap_or(Token::Exit),
+                        Token::Greater | Token::Less | Token::GreatEq | Token::LessEq
+                    ) {
+                        let op = self.next_token().unwrap();
+
+                        match self.parse_expr() {
+                            Ok(right) => {
+                                left = AST::BinOp {
+                                    left: Box::new(left),
+                                    op: op,
+                                    right: Box::new(right),
+                                };
+                            }
+
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
+                    }
+                    return Ok(left);
+                }
+
+                return Err(self.error(EXPECTED_VAL, start, None, "Expected an expression"));
+            }
+
+            Err(e) => Err(e),
+        }
+    }
+
+    fn parse_equal(&mut self) -> Result<AST, Error> {
+        let start = self.location().start;
+        match self.parse_comp() {
+            Ok(c) => {
+                if Parser::valid_operand(&c) {
+                    let mut left = c;
+
+                    while matches!(
+                        self.get_token().unwrap_or(Token::Exit),
+                        Token::CompareEq | Token::NotEq
+                    ) {
+                        let op = self.next_token().unwrap();
+
+                        match self.parse_comp() {
+                            Ok(right) => {
+                                left = AST::BinOp {
+                                    left: Box::new(left),
+                                    op: op,
+                                    right: Box::new(right),
+                                };
+                            }
+
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
+                    }
+                    return Ok(left);
+                }
+
+                return Err(self.error(EXPECTED_VAL, start, None, "Expected an expression"));
+            }
+
+            Err(e) => Err(e),
+        }
+    }
+
+    fn parse_and(&mut self) -> Result<AST, Error> {
+        let start = self.location().start;
+        match self.parse_equal() {
+            Ok(e) => {
+                if Parser::valid_operand(&e) {
+                    let mut left = e;
+
+                    while matches!(self.get_token().unwrap_or(Token::Exit), Token::And) {
+                        self.next_token();
+
+                        match self.parse_equal() {
+                            Ok(right) => {
+                                left = AST::BinOp {
+                                    left: Box::new(left),
+                                    op: Token::And,
+                                    right: Box::new(right),
+                                };
+                            }
+
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
+                    }
+                    return Ok(left);
+                }
+
+                return Err(self.error(EXPECTED_VAL, start, None, "Expected an expression"));
+            }
+
+            Err(e) => Err(e),
+        }
+    }
+
+    fn parse_or(&mut self) -> Result<AST, Error> {
+        let start = self.location().start;
+        match self.parse_and() {
+            Ok(a) => {
+                if Parser::valid_operand(&a) {
+                    let mut left = a;
+
+                    while matches!(self.get_token().unwrap_or(Token::Exit), Token::Or) {
+                        self.next_token();
+
+                        match self.parse_and() {
+                            Ok(right) => {
+                                left = AST::BinOp {
+                                    left: Box::new(left),
+                                    op: Token::Or,
+                                    right: Box::new(right),
+                                };
+                            }
+
+                            Err(e) => {
+                                return Err(e);
+                            }
+                        }
+                    }
+                    return Ok(left);
+                }
+
+                return Err(self.error(EXPECTED_VAL, start, None, "Expected an expression"));
             }
 
             Err(e) => Err(e),
@@ -776,7 +981,7 @@ impl Parser {
                     if let Some(AST::ProcDef { name, params, body }) = self.find_proc(&id) {
                         let mut args: Vec<Box<AST>> = Vec::new();
                         for param in &params {
-                            match self.parse_expr() {
+                            match self.parse_or() {
                                 Ok(arg) => {
                                     if let Some(t) = self.get_type(&arg) {
                                         if t == param.1 {
@@ -821,11 +1026,11 @@ impl Parser {
                     }
                     if !matches!(self.get_token().unwrap_or(Token::Exit), Token::Eq) {
                         let end = self.location().end;
-                        
+
                         return Err(self.error(FLOATING_ID, start, Some(end), &format!("Identifier '{}' not part of a statement or expression. Did you forget to define a procedure?", id)));
                     } else {
                         self.next_token();
-                        match self.parse_expr() {
+                        match self.parse_or() {
                             Ok(expr) => {
                                 let expr_type: Type;
                                 if let Some(t) = self.get_type(&expr) {
@@ -863,7 +1068,7 @@ impl Parser {
                 Token::Exit => {
                     self.next_token();
 
-                    match self.parse_expr() {
+                    match self.parse_or() {
                         Ok(expr) => {
                             if let Some(t) = self.get_type(&expr) {
                                 if t == Type::Int {
@@ -879,7 +1084,11 @@ impl Parser {
                                 ));
                             } else {
                                 if let AST::VarGet { id } = expr {
-                                    return Err(self.not_defined_err(start, Some(self.location().end), id));
+                                    return Err(self.not_defined_err(
+                                        start,
+                                        Some(self.location().end),
+                                        id,
+                                    ));
                                 }
                                 return Err(self.error(TYPE_ERR, start, Some(self.location().end), "Unable to determine type of expression result; exit requires an INT result"));
                             }
@@ -895,6 +1104,78 @@ impl Parser {
                     self.next_token();
 
                     return Ok(AST::ASM { body: raw });
+                }
+
+                Token::If => {
+                    self.next_token();
+
+                    let start = self.location().start;
+                    let mut ended = false;
+                    let condition = Box::new(self.parse_or()?);
+                    let mut branches = Vec::new();
+                    let mut elsebranch = None;
+                    let mut mainbody = Vec::new();
+
+                    while self.idx < self.tokens.len() {
+                        if self.tokens[self.idx].0 == Token::EndIf {
+                            self.next_token();
+                            ended = true;
+                            break;
+                        }
+
+                        if self.tokens[self.idx].0 == Token::Elif {
+                            self.next_token();
+                            let branchcondition = Box::new(self.parse_or()?);
+                            let mut body = Vec::new();
+
+                            while self.idx < self.tokens.len() {
+                                if matches!(
+                                    self.tokens[self.idx].0,
+                                    Token::Elif | Token::Else | Token::EndIf
+                                ) {
+                                    break;
+                                }
+
+                                body.push(Box::new(self.parse_stmt()?));
+                            }
+
+                            branches.push((branchcondition, body));
+                            continue;
+                        }
+
+                        if self.tokens[self.idx].0 == Token::Else {
+                            self.next_token();
+                            let mut body = Vec::new();
+
+                            while self.idx < self.tokens.len() {
+                                if self.tokens[self.idx].0 == Token::EndIf {
+                                    break;
+                                }
+
+                                body.push(Box::new(self.parse_stmt()?));
+                            }
+                            elsebranch = Some(body);
+                            continue;
+                        }
+
+                        mainbody.push(Box::new(self.parse_stmt()?));
+                    }
+
+                    if !ended {
+                        return Err(self.error(
+                            IF_SYNTAX,
+                            start,
+                            Some(self.location().end),
+                            "If statement not ended (if ... endif)",
+                        ));
+                    }
+
+                    return Ok(AST::If {
+                        cond: condition,
+                        body: mainbody,
+                        branches: branches,
+                        elsebranch: elsebranch,
+                    });
                 }
 
                 _ => {
@@ -923,10 +1204,11 @@ impl Parser {
                 Ok(ok) => ok,
                 Err(e) => {
                     return Err(e);
-                },
+                }
             };
 
-            self.program.push((stmt, Span::new(start, self.location().end)));
+            self.program
+                .push((stmt, Span::new(start, self.location().end)));
         }
 
         Ok(self.program.clone())
