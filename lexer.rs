@@ -1,4 +1,4 @@
- use core::fmt;
+use core::fmt;
 
 use super::strikeerror::*;
 
@@ -7,14 +7,15 @@ pub enum Value {
     Float(f32),
     Int(i64),
     Str(String),
+    Bool(bool),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Token {
     Val(Value),
     ID(String),
-    ForOpen,
-    ForClose,
+    For,
+    EndFor,
     Asm(String),
     Exit,
     Func,
@@ -26,13 +27,27 @@ pub enum Token {
     ReqMutStr,
     LCurly,
     RCurly,
-    Eq, // TODO doubleeq, noteq, : filter, ! map
+    Eq, // TODO : filter, ! map
     Add,
     Sub,
     Mul,
     Div,
     Greater,
     Less,
+    CompareEq,
+    NotEq,
+    GreatEq,
+    LessEq,
+    Not,
+    And,
+    Or,
+    If,
+    Else,
+    Elif,
+    EndIf,
+    IsStatic,
+    DynaStr,
+    DynaAddr,
 }
 
 impl fmt::Display for Token {
@@ -42,10 +57,11 @@ impl fmt::Display for Token {
                 Value::Float(flt) => write!(f, "Float({})", flt),
                 Value::Int(int) => write!(f, "Int({})", int),
                 Value::Str(strlit) => write!(f, "Str(\"{}\")", strlit),
+                Value::Bool(b) => write!(f, "Bool({}", b),
             },
             Token::ID(id) => write!(f, "ID({})", id),
-            Token::ForOpen => write!(f, "ForOpen"),
-            Token::ForClose => write!(f, "ForClose"),
+            Token::For => write!(f, "For"),
+            Token::EndFor => write!(f, "EndFor"),
             Token::Asm(raw) => write!(f, "Asm({})", raw),
             Token::Exit => write!(f, "Exit"),
             Token::Func => write!(f, "Func"),
@@ -64,6 +80,21 @@ impl fmt::Display for Token {
             Token::Div => write!(f, "Div"),
             Token::Greater => write!(f, "Greater"),
             Token::Less => write!(f, "Less"),
+            Token::CompareEq => write!(f, "CompareEq"),
+            Token::NotEq => write!(f, "NotEq"),
+            Token::GreatEq => write!(f, "GreatEq"),
+            Token::LessEq => write!(f, "LessEq"),
+            Token::Not => write!(f, "Not"),
+            Token::And => write!(f, "And"),
+            Token::Or => write!(f, "Or"),
+            Token::If => write!(f, "If"),
+            Token::Else => write!(f, "Else"),
+            Token::Elif => write!(f, "Elif"),
+            Token::EndIf => write!(f, "EndIf"),
+            Token::IsStatic => write!(f, "IsStatic"),
+            Token::DynaStr => write!(f, "DynaStr"),
+            Token::DynaAddr => write!(f, "DynaAddr"),
+
         }
     }
 }
@@ -130,7 +161,7 @@ impl Lexer {
         let mut buf = String::new();
 
         while self.idx < self.chars.len()
-            && Lexer::is_id_char(self.nth_char(self.idx).unwrap())
+            && (Lexer::is_id_char(self.nth_char(self.idx).unwrap()) || self.nth_char(self.idx).unwrap().is_ascii_digit())
         {
             buf.push(self.nth_char(self.idx).unwrap());
             self.idx += 1;
@@ -173,7 +204,6 @@ impl Lexer {
         }
 
         if self.idx >= self.chars.len()
-            || buf == ""
             || self.nth_char(self.idx).unwrap() != '"'
         {
             return Err(String::from("Unclosed string literal (missing '\"'"));
@@ -285,13 +315,22 @@ impl Lexer {
                 let start = self.location();
                 let id = self.lex_id();
                 self.pushwloc(match id.as_str() {
-                    "for" => Token::ForOpen,
-                    "endfr" => Token::ForClose,
+                    "for" => Token::For,
+                    "endfr" => Token::EndFor,
                     "exit" => Token::Exit,
                     "fn" => Token::Func,
                     "proc" => Token::Proc,
                     "reqstr" => Token::ReqStr,
                     "reqmutstr" => Token::ReqMutStr,
+                    "true" => Token::Val(Value::Bool(true)),
+                    "false" => Token::Val(Value::Bool(false)),
+                    "if" => Token::If,
+                    "else" => Token::Else,
+                    "elif" => Token::Elif,
+                    "endif" => Token::EndIf,
+                    "isstatic" => Token::IsStatic,
+                    "dynastr" => Token::DynaStr,
+                    "dynaaddr" => Token::DynaAddr,
                     _ => Token::ID(id),
                 }, start);
                 continue;
@@ -338,15 +377,28 @@ impl Lexer {
                     }
 
                     '{' => {
-                        self.pushwloc(Token::LCurly, self.location());
-                    }
-
-                    '}' => {
                         self.pushwloc(Token::RCurly, self.location());
                     }
 
+                    '}' => {
+                        self.pushwloc(Token::LCurly, self.location());
+                    }
+
                     '=' => {
-                        self.pushwloc(Token::Eq, self.location());
+                        match self.peek() {
+                            Some(c) => {
+                                if c == '=' {
+                                    self.pushwloc(Token::CompareEq, self.location());
+                                    self.idx += 1;
+                                } else {
+                                    self.pushwloc(Token::Eq, self.location());
+                                }
+                            }
+
+                            None => {
+                                self.pushwloc(Token::Eq, self.location());
+                            }
+                        }
                     }
 
                     '+' => {
@@ -362,12 +414,74 @@ impl Lexer {
                     }
                     
                     '>' => {
-                        self.pushwloc(Token::Greater, self.location());
+                        match self.peek() {
+                            Some(c) => {
+                                if c == '=' {
+                                    self.pushwloc(Token::GreatEq, self.location());
+                                    self.idx += 1;
+                                } else {
+                                    self.pushwloc(Token::Greater, self.location());
+                                }
+                            }
+
+                            None => {
+                                self.pushwloc(Token::Greater, self.location());
+                            }
+                        }
                     }
 
                     '<' => {
-                        self.pushwloc(Token::Less, self.location());
+                        match self.peek() {
+                            Some(c) => {
+                                if c == '=' {
+                                    self.pushwloc(Token::LessEq, self.location());
+                                    self.idx += 1;
+                                } else {
+                                    self.pushwloc(Token::Less, self.location());
+                                }
+                            }
+
+                            None => {
+                                self.pushwloc(Token::Less, self.location());
+                            }
+                        }
                     }
+
+                    '!' => {
+                        match self.peek() {
+                            Some(c) => {
+                                if c == '=' {
+                                    self.pushwloc(Token::NotEq, self.location());
+                                    self.idx += 1;
+                                } else {
+                                    self.pushwloc(Token::Not, self.location());
+                                }
+                            }
+
+                            None => {
+                                self.pushwloc(Token::Not, self.location());
+                            }
+                        }
+                    }
+
+                    '&' => {
+                        if let Some(c) = self.peek() {
+                            if c == '&' {
+                                self.idx += 1;
+                            }
+                        }
+                        self.pushwloc(Token::And, self.location());
+                    }
+
+                    '|' => {
+                        if let Some(c) = self.peek() {
+                            if c == '|' {
+                                self.idx += 1;
+                            }
+                        }
+                        self.pushwloc(Token::Or, self.location());
+                    }
+
                     _ => {
                         return Err(self.error(
                             UNEXPECTED_CHAR,
