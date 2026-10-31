@@ -1,3 +1,7 @@
+use crate::filehandling::get_code_from_jcmd;
+use crate::lexer::Lexer;
+use crate::parser::AST::ProcDef;
+
 use super::lexer::{Token, Value};
 use super::strikeerror::*;
 use std::fmt;
@@ -121,11 +125,14 @@ pub enum AST {
     },
     DynaStr {
         str_addr: Box<AST>, // Developer must make sure addr + _len is where length is stored
-        len: Box<AST>,      // Static len of string
-        // Reason: asm needs _len and compiler buffers need to know size at compile time
+        size: Box<AST>, // Capacity to know at compile time for buffers
     },
     DynaAddr {
         expr: Box<AST>,
+    },
+    SCast {
+        expr: Box<AST>,
+        t: Type,
     },
 }
 
@@ -150,7 +157,7 @@ pub struct Parser {
     tokens: Vec<(Token, Span)>,
     program: Vec<(AST, Span)>,
     idx: usize,
-    scope: ParserScope,
+    scopes: Vec<ParserScope>,
     filename: String,
     raw: String,
 }
@@ -161,7 +168,7 @@ impl Parser {
             tokens: tokens,
             program: Vec::new(),
             idx: 0,
-            scope: ParserScope::new(),
+            scopes: Vec::new(),
             filename: fname,
             raw: rawcode,
         }
@@ -186,9 +193,64 @@ impl Parser {
         )
     }
 
+    fn flatten_scopes(&self) -> ParserScope {
+        let mut flattened = ParserScope::new();
+
+        for scope in self.scopes.iter().rev() {
+            for lvar in &scope.vars {
+                let mut exists = false;
+                for var in &flattened.vars {
+                    if var.0 == lvar.0 {
+                        exists = true;
+                        break;
+                    }
+                }
+                if !exists {
+                    flattened.vars.push(lvar.clone());
+                }
+            }
+
+            for lproc in &scope.procs {
+                let mut exists = false;
+                for proc in &flattened.procs {
+                    if let AST::ProcDef { name, .. } = proc {
+                        if let AST::ProcDef { name: lname, .. } = lproc {
+                            if *name == *lname {
+                                exists = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !exists {
+                    flattened.procs.push(lproc.clone());
+                }
+            }
+
+            for lfunc in &scope.funcs {
+                let mut exists = false;
+                for func in &flattened.funcs {
+                    if let AST::FuncDef { name, .. } = func {
+                        if let AST::FuncDef { name: lname, .. } = lfunc {
+                            if *name == *lname {
+                                exists = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !exists {
+                    flattened.funcs.push(lfunc.clone());
+                }
+            }
+        }
+
+        flattened
+    }
+
     fn find_proc(&self, procname: &str) -> Option<AST> {
-        for m in &self.scope.procs {
-            if let AST::ProcDef { name, .. } = m {
+        for m in self.flatten_scopes().procs {
+            if let AST::ProcDef { name, .. } = &m {
                 if name == procname {
                     return Some(m.clone());
                 }
@@ -199,13 +261,13 @@ impl Parser {
     }
 
     fn find_func(&self, fnname: &str) -> Option<AST> {
-        for m in &self.scope.funcs {
+        for m in self.flatten_scopes().funcs {
             if let AST::FuncDef {
                 name,
-                params,
-                body,
-                rettype,
-            } = m
+                params: _,
+                body: _,
+                rettype: _,
+            } = &m
             {
                 if name == fnname {
                     return Some(m.clone());
@@ -217,7 +279,7 @@ impl Parser {
     }
 
     fn find_var(&self, varname: &str) -> Option<(String, Type)> {
-        for var in &self.scope.vars {
+        for var in self.flatten_scopes().vars {
             if var.0 == varname {
                 return Some(var.clone());
             }
@@ -228,13 +290,14 @@ impl Parser {
 
     fn location(&self) -> Span {
         self.get_token_span()
-            .unwrap_or(self.tokens[self.tokens.len() - 1].1)
+            .unwrap_or(Span::new(self.raw.len(), self.raw.len()))
     }
 
     fn get_token(&self) -> Option<Token> {
         if self.idx < self.tokens.len() {
             return Some(self.tokens[self.idx].0.clone());
         }
+
         None
     }
 
@@ -281,7 +344,7 @@ impl Parser {
                 return None;
             }
 
-            AST::UnaryOp { op, expr } => {
+            AST::UnaryOp { op: _, expr } => {
                 return self.get_type(&*expr);
             }
 
@@ -297,7 +360,7 @@ impl Parser {
                 }
             }
 
-            AST::FuncCall { name, args } => {
+            AST::FuncCall { name, args: _ } => {
                 if let Some(AST::FuncDef { rettype, .. }) = self.find_func(name) {
                     return Some(rettype);
                 } else {
@@ -306,7 +369,7 @@ impl Parser {
             }
 
             AST::VarGet { id } => {
-                if let Some((n, t)) = self.find_var(&id) {
+                if let Some((_n, t)) = self.find_var(&id) {
                     return Some(t);
                 } else {
                     return None;
@@ -320,8 +383,12 @@ impl Parser {
                 return Some(Type::Str);
             }
 
-            AST::IsStatic { expr } => {
+            AST::IsStatic { expr: _ } => {
                 return Some(Type::Bool);
+            }
+
+            AST::SCast { expr, t } => {
+                return Some(t.clone());
             }
             _ => None,
         }
@@ -394,10 +461,10 @@ impl Parser {
 
                 Token::ID(id) => {
                     if let Some(AST::FuncDef {
-                        name,
+                        name: _,
                         params,
-                        body,
-                        rettype,
+                        body: _,
+                        rettype: _,
                     }) = self.find_func(&id)
                     {
                         let mut args: Vec<Box<AST>> = Vec::new();
@@ -480,7 +547,7 @@ impl Parser {
 
                 Token::ReqStr => {
                     if self.idx >= self.tokens.len()
-                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                        || !matches!(self.next_token(), Some(Token::LCurly))
                     {
                         return Err(self.error(
                             EXPECTED_VAL,
@@ -490,15 +557,11 @@ impl Parser {
                         ));
                     }
 
-                    self.next_token();
-
                     let start = self.location().start;
                     match self.parse_or() {
                         Ok(u) => {
                             if self.get_type(&u) == Some(Type::Str) {
-                                if self.idx >= self.tokens.len()
-                                    || !matches!(self.tokens[self.idx].0, Token::LCurly)
-                                {
+                                if !matches!(self.next_token(), Some(Token::RCurly)) {
                                     return Err(self.error(
                                         EXPECTED_VAL,
                                         start,
@@ -506,8 +569,6 @@ impl Parser {
                                         "Expected '}' in reqstr compiler instruction (reqstr{STATIC STRING})",
                                     ));
                                 }
-
-                                self.next_token();
 
                                 return Ok(AST::ReqStr { expr: Box::new(u) });
                             }
@@ -526,7 +587,7 @@ impl Parser {
 
                 Token::ReqMutStr => {
                     if self.idx >= self.tokens.len()
-                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                        || !matches!(self.next_token(), Some(Token::LCurly))
                     {
                         return Err(self.error(
                             EXPECTED_VAL,
@@ -534,17 +595,13 @@ impl Parser {
                             Some(self.location().end),
                             "Expected '{' in reqmutstr compiler instruction (reqmutstr{STATIC INT})",
                         ));
-                    }
-
-                    self.next_token();
+                    };
 
                     let start = self.location().start;
                     match self.parse_or() {
                         Ok(u) => {
                             if self.get_type(&u) == Some(Type::Int) {
-                                if self.idx >= self.tokens.len()
-                                    || !matches!(self.tokens[self.idx].0, Token::LCurly)
-                                {
+                                if !matches!(self.next_token(), Some(Token::RCurly)) {
                                     return Err(self.error(
                                         EXPECTED_VAL,
                                         start,
@@ -552,8 +609,6 @@ impl Parser {
                                         "Expected '}' in reqmutstr compiler instruction (reqmutstr{STATIC INT})",
                                     ));
                                 }
-
-                                self.next_token();
 
                                 return Ok(AST::ReqMutStr { expr: Box::new(u) });
                             }
@@ -572,7 +627,7 @@ impl Parser {
 
                 Token::IsStatic => {
                     if self.idx >= self.tokens.len()
-                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                        || !matches!(self.next_token(), Some(Token::LCurly))
                     {
                         return Err(self.error(
                             EXPECTED_VAL,
@@ -582,13 +637,11 @@ impl Parser {
                         ));
                     }
 
-                    self.next_token();
-
                     let start = self.location().start;
                     match self.parse_or() {
                         Ok(u) => {
                             if self.idx >= self.tokens.len()
-                                || !matches!(self.tokens[self.idx].0, Token::LCurly)
+                                || !matches!(self.next_token(), Some(Token::RCurly))
                             {
                                 return Err(self.error(
                                     EXPECTED_VAL,
@@ -597,8 +650,6 @@ impl Parser {
                                     "Expected '}' in isstatic compiler instruction (isstatic{VALUE})",
                                 ));
                             }
-
-                            self.next_token();
 
                             return Ok(AST::IsStatic { expr: Box::new(u) });
                         }
@@ -609,72 +660,40 @@ impl Parser {
 
                 Token::DynaStr => {
                     if self.idx >= self.tokens.len()
-                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                        || !matches!(self.next_token(), Some(Token::LCurly))
                     {
                         return Err(self.error(
                             EXPECTED_VAL,
                             start,
                             Some(self.location().end),
-                            "Expected '{' in dynastr compiler instruction (dynastr{ADDRESS, LEN})",
+                            "Expected '{' in dynastr compiler instruction (dynastr{ADDRESS, STATIC INT})",
                         ));
                     }
-
-                    self.next_token();
 
                     let start = self.location().start;
                     match self.parse_or() {
                         Ok(straddr) => {
-                            // Now parse for a comma and then get another int
                             if let Some(Type::Str) = self.get_type(&straddr) {
-                                if self.idx >= self.tokens.len() || self.next_token() != Some(Token::Comma) {
-                                    return Err(self.error(
-                                        EXPECTED_VAL,
-                                        start,
-                                        Some(self.location().end),
-                                        "Expected ',' in dynastr compiler instruction (dynastr{ADDRESS, LEN})",
-                                    ));
+                                if !matches!(self.next_token(), Some(Token::Comma)) {
+                                    return Err(self.error(EXPECTED_VAL, start, Some(self.location().end), "Expected comma in dynastr compiler instruction (dynastr{ADDRESS, STATIC INT})"));
                                 }
-                                if let Ok(len) = self.parse_or() {
-                                    if let Some(Type::Int) = self.get_type(&len) {
-                                        if self.idx >= self.tokens.len()
-                                            || !matches!(self.get_token().unwrap(), Token::LCurly)
-                                        {
-                                            return Err(self.error(
-                                                EXPECTED_VAL,
-                                                start,
-                                                Some(self.location().end),
-                                                "Expected '}' in dynastr compiler instruction (dynastr{ADDRESS, LEN})",
-                                            ));
-                                        }
+                                let capacity = self.parse_or()?;
 
-                                        self.next_token();
-
-                                        return Ok(AST::DynaStr {
-                                            str_addr: Box::new(straddr),
-                                            len: Box::new(len),
-                                        });
-                                    } else {
-                                        return Err(self.error(
-                                            TYPE_ERR,
-                                            start,
-                                            Some(self.location().end),
-                                            "Expected integer value for dynastr compiler instruction (dynastr{ADDRESS, LEN})",
-                                        ));
+                                if let Some(Type::Int) = self.get_type(&capacity) {
+                                    if !matches!(self.next_token(), Some(Token::RCurly)) {
+                                        return Err(self.error(EXPECTED_VAL, start, Some(self.location().end), "Expected '}' in dynastr compiler instruction (dynastr{ADDRESS, STATIC INT})"));
                                     }
+
+                                    return Ok(AST::DynaStr { str_addr: Box::new(straddr), size: Box::new(capacity) });
                                 } else {
-                                    return Err(self.error(
-                                        EXPECTED_VAL,
-                                        start,
-                                        Some(self.location().end),
-                                        "Expected integer value for dynastr compiler instruction (dynastr{ADDRESS, LEN})",
-                                    ));
+                                    return Err(self.error(TYPE_ERR, start, Some(self.location().end), "Expected integer value for dynastr compiler instruction (dynastr{ADDRESS, STATIC INT})"));
                                 }
                             } else {
                                 return Err(self.error(
                                     TYPE_ERR,
                                     start,
                                     Some(self.location().end),
-                                    "Expected string value for dynastr compiler instruction (dynastr{ADDRESS})",
+                                    "Expected string value for dynastr compiler instruction (dynastr{ADDRESS, STATIC INT})",
                                 ));
                             }
                         }
@@ -685,23 +704,21 @@ impl Parser {
 
                 Token::DynaAddr => {
                     if self.idx >= self.tokens.len()
-                        || !matches!(self.tokens[self.idx].0, Token::RCurly)
+                        || !matches!(self.next_token(), Some(Token::LCurly))
                     {
                         return Err(self.error(
                             EXPECTED_VAL,
                             start,
                             Some(self.location().end),
-                            "Expected '<' in dynaaddr compiler instruction (dynaaddr{DYNAMIC VALUE})",
+                            "Expected '{' in dynaaddr compiler instruction (dynaaddr{DYNAMIC VALUE})",
                         ));
                     }
-
-                    self.next_token();
 
                     let start = self.location().start;
                     match self.parse_or() {
                         Ok(u) => {
                             if self.idx >= self.tokens.len()
-                                || !matches!(self.tokens[self.idx].0, Token::LCurly)
+                                || !matches!(self.next_token(), Some(Token::RCurly))
                             {
                                 return Err(self.error(
                                     EXPECTED_VAL,
@@ -711,9 +728,56 @@ impl Parser {
                                 ));
                             }
 
-                            self.next_token();
-
                             return Ok(AST::DynaAddr { expr: Box::new(u) });
+                        }
+
+                        Err(e) => return Err(e),
+                    };
+                }
+
+                Token::SCast => {
+                    if self.idx >= self.tokens.len()
+                        || !matches!(self.next_token(), Some(Token::LCurly))
+                    {
+                        return Err(self.error(
+                            EXPECTED_VAL,
+                            start,
+                            Some(self.location().end),
+                            "Expected '{' in scast compiler instruction (scast{STATIC VALUE, TYPE})",
+                        ));
+                    }
+
+                    let start = self.location().start;
+                    match self.parse_or() {
+                        Ok(u) => {
+                            if self.next_token() != Some(Token::Comma) {
+                                return Err(self.error(EXPECTED_VAL, start, Some(self.location().end), "Expected comma in scast compiler instruction (scast{STATIC VALUE, TYPE})"));
+                            }
+
+                            let t = match self.next_token() {
+                                Some(ty) => match ty {
+                                    Token::StrType => Type::Str,
+
+                                    Token::IntType => Type::Int,
+
+                                    _ => {
+                                        return Err(self.error(EXPECTED_VAL, start, Some(self.location().end), "Expected type in scast compiler instruction (scast{STATIC VALUE, TYPE})"));
+                                    }
+                                },
+
+                                None => {
+                                    return Err(self.error(EXPECTED_VAL, start, Some(self.location().end), "Expected type in scast compiler instruction (scast{STATIC VALUE, TYPE})"));
+                                }
+                            };
+
+                            if self.next_token() != Some(Token::RCurly) {
+                                return Err(self.error(EXPECTED_VAL, start, Some(self.location().end), "Expected '}' in scast compiler instruction (scast{STATIC VALUE, TYPE})"));
+                            }
+
+                            return Ok(AST::SCast {
+                                expr: Box::new(u),
+                                t: t,
+                            });
                         }
 
                         Err(e) => return Err(e),
@@ -752,6 +816,7 @@ impl Parser {
                 | AST::IsStatic { .. }
                 | AST::DynaStr { .. }
                 | AST::DynaAddr { .. }
+                | AST::SCast { .. }
         )
     }
 
@@ -970,15 +1035,20 @@ impl Parser {
         }
     }
 
-    // So far: Proc calls, var = expr, ...
-    fn parse_stmt(&mut self) -> Result<AST, Error> {
+    // So far: Proc calls, var = expr, proc defs, use statements, ...
+    fn parse_stmt(&mut self) -> Result<Option<AST>, Error> {
         let start = self.location().start;
 
         if let Some(tok) = self.get_token() {
             match tok {
                 Token::ID(id) => {
                     self.next_token();
-                    if let Some(AST::ProcDef { name, params, body }) = self.find_proc(&id) {
+                    if let Some(AST::ProcDef {
+                        name,
+                        params,
+                        body: _,
+                    }) = self.find_proc(&id)
+                    {
                         let mut args: Vec<Box<AST>> = Vec::new();
                         for param in &params {
                             match self.parse_or() {
@@ -1019,10 +1089,10 @@ impl Parser {
                             }
                         }
 
-                        return Ok(AST::ProcCall {
+                        return Ok(Some(AST::ProcCall {
                             name: name,
                             args: args,
-                        });
+                        }));
                     }
                     if !matches!(self.get_token().unwrap_or(Token::Exit), Token::Eq) {
                         let end = self.location().end;
@@ -1051,11 +1121,14 @@ impl Parser {
                                     ));
                                 }
 
-                                self.scope.vars.push((id.clone(), expr_type));
-                                return Ok(AST::VarSet {
+                                let scopes_len = self.scopes.len();
+                                self.scopes[scopes_len - 1]
+                                    .vars
+                                    .push((id.clone(), expr_type));
+                                return Ok(Some(AST::VarSet {
                                     id: id,
                                     expr: Box::new(expr),
-                                });
+                                }));
                             }
 
                             Err(e) => {
@@ -1072,9 +1145,9 @@ impl Parser {
                         Ok(expr) => {
                             if let Some(t) = self.get_type(&expr) {
                                 if t == Type::Int {
-                                    return Ok(AST::Exit {
+                                    return Ok(Some(AST::Exit {
                                         code: Box::new(expr),
-                                    });
+                                    }));
                                 }
                                 return Err(self.error(
                                     TYPE_ERR,
@@ -1103,7 +1176,7 @@ impl Parser {
                 Token::Asm(raw) => {
                     self.next_token();
 
-                    return Ok(AST::ASM { body: raw });
+                    return Ok(Some(AST::ASM { body: raw }));
                 }
 
                 Token::If => {
@@ -1136,7 +1209,9 @@ impl Parser {
                                     break;
                                 }
 
-                                body.push(Box::new(self.parse_stmt()?));
+                                if let Some(stmt) = self.parse_stmt()? {
+                                    body.push(Box::new(stmt));
+                                }
                             }
 
                             branches.push((branchcondition, body));
@@ -1152,13 +1227,17 @@ impl Parser {
                                     break;
                                 }
 
-                                body.push(Box::new(self.parse_stmt()?));
+                                if let Some(stmt) = self.parse_stmt()? {
+                                    body.push(Box::new(stmt));
+                                }
                             }
                             elsebranch = Some(body);
                             continue;
                         }
 
-                        mainbody.push(Box::new(self.parse_stmt()?));
+                        if let Some(stmt) = self.parse_stmt()? {
+                            mainbody.push(Box::new(stmt));
+                        }
                     }
 
                     if !ended {
@@ -1170,12 +1249,195 @@ impl Parser {
                         ));
                     }
 
-                    return Ok(AST::If {
+                    return Ok(Some(AST::If {
                         cond: condition,
                         body: mainbody,
                         branches: branches,
                         elsebranch: elsebranch,
-                    });
+                    }));
+                }
+
+                Token::Proc => {
+                    self.next_token();
+
+                    if let Some(Token::ID(name)) = self.next_token() {
+                        if self.next_token() != Some(Token::LParen) {
+                            return Err(self.error(PROC_DEF, start, Some(self.location().end), "Expected '(' in procedure definition (required even if you don't have arguments) (proc name(args) ... endpc)"));
+                        }
+
+                        if self.get_token() == Some(Token::RParen) {
+                            self.next_token();
+                            let mut statements = Vec::new();
+                            let mut endedblock = false;
+
+                            while self.idx < self.tokens.len() {
+                                if self.get_token() == Some(Token::EndProc) {
+                                    self.next_token();
+                                    endedblock = true;
+                                    break;
+                                }
+                                if let Some(stmt) = self.parse_stmt()? {
+                                    statements.push(Box::new(stmt));
+                                }
+                            }
+
+                            if !endedblock {
+                                return Err(self.error(
+                                    PROC_DEF,
+                                    start,
+                                    Some(self.location().end),
+                                    "Procedure not ended with endpc (proc name(args) ... endpc)",
+                                ));
+                            }
+
+                            let proc_def = AST::ProcDef {
+                                name: name,
+                                params: Vec::new(),
+                                body: statements,
+                            };
+
+                            let scopes_len = self.scopes.len();
+                            self.scopes[scopes_len - 1].procs.push(proc_def.clone());
+                            return Ok(Some(proc_def));
+                        }
+
+                        let mut args = Vec::new();
+
+                        while self.idx < self.tokens.len() {
+                            if let Some(Token::ID(param_name)) = self.next_token() {
+                                match self.next_token() {
+                                    Some(t) => {
+                                        match t {
+                                            Token::StrType => {
+                                                args.push((param_name, Type::Str));
+                                            }
+
+                                            Token::IntType => {
+                                                args.push((param_name, Type::Int));
+                                            }
+
+                                            _ => {
+                                                return Err(self.error(PROC_DEF, start, Some(self.location().end), "Expected type in procedure definition (e.g proc say (text STR) endpc)"));
+                                            }
+                                        };
+                                    }
+
+                                    None => {
+                                        return Err(self.error(PROC_DEF, start, Some(self.location().end), "Expected type in procedure definition (e.g proc say (text STR) endpc)"));
+                                    }
+                                };
+                                if self.get_token() == Some(Token::Comma) {
+                                    self.next_token();
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        if self.next_token() != Some(Token::RParen) {
+                            return Err(self.error(
+                                PROC_DEF,
+                                start,
+                                Some(self.location().end),
+                                "Expected ')' in procedure definition (proc name(args) ... endpc)",
+                            ));
+                        }
+
+                        let mut statements = Vec::new();
+                        let mut endedblock = false;
+                        self.scopes.push(ParserScope::new());
+
+                        for arg in &args {
+                            let scopes_len = self.scopes.len();
+                            self.scopes[scopes_len - 1].vars.push(arg.clone());
+                        }
+
+                        while self.idx < self.tokens.len() {
+                            if self.get_token() == Some(Token::EndProc) {
+                                self.next_token();
+                                endedblock = true;
+                                break;
+                            }
+                            if let Some(stmt) = self.parse_stmt()? {
+                                statements.push(Box::new(stmt));
+                            }
+                        }
+
+                        if !endedblock {
+                            return Err(self.error(
+                                PROC_DEF,
+                                start,
+                                Some(self.location().end),
+                                "Procedure not ended with endpc (proc name(args) ... endpc)",
+                            ));
+                        }
+
+                        let proc_def = AST::ProcDef {
+                            name: name,
+                            params: args,
+                            body: statements,
+                        };
+                        self.scopes.remove(self.scopes.len() - 1);
+
+                        let scopes_len = self.scopes.len();
+                        self.scopes[scopes_len - 1].procs.push(proc_def.clone());
+                        return Ok(Some(proc_def));
+                    } else {
+                        return Err(self.error(PROC_DEF, start, Some(self.location().end), "Expected identifier in procedure definition (proc NAME(args) ... endpc)"));
+                    }
+                }
+
+                Token::Use => {
+                    self.next_token();
+                    if let Some(Token::Val(val)) = self.next_token() {
+                        if let Value::Str(fpath) = val {
+
+                            let code = match get_code_from_jcmd(&(fpath.clone() + ".jcmd")) {
+                                Ok(c) => c,
+
+                                Err(e) => {
+                                    return Err(self.error(COMP_INST, start, Some(self.location().end), &e));
+                                }
+                            };
+
+                            let mut lexer = Lexer::new(code.clone(), fpath.clone());
+                            let mut parser = Parser::new(lexer.lex()?, fpath, code.clone());
+                            let mut res = parser.parse()?;
+                            self.program.append(&mut res);
+                            for var in parser.flatten_scopes().vars {
+                                if self.find_var(&var.0) == None {
+                                    let scopes_len = self.scopes.len();
+                                    self.scopes[scopes_len - 1].vars.push(var);
+                                }
+                            }
+
+                            for proc in parser.flatten_scopes().procs {
+                                if let AST::ProcDef { name, params, body } = &proc {
+                                    if self.find_proc(&name) == None {
+                                        let scopes_len = self.scopes.len();
+                                        self.scopes[scopes_len - 1].procs.push(proc);
+                                    }
+                                }
+                            }
+
+                            for func in parser.flatten_scopes().funcs {
+                                if let AST::FuncDef { name, params, body, rettype } = &func {
+                                    if self.find_func(&name) == None {
+                                        let scopes_len = self.scopes.len();
+                                        self.scopes[scopes_len - 1].funcs.push(func);
+                                    }
+                                }
+                            }
+
+
+                            return Ok(None);
+                        }
+                    }
+                    return Err(self.error(
+                        EXPECTED_VAL,
+                        start,
+                        Some(self.location().end),
+                        "Expected string value (use \"path\")",
+                    ));
                 }
 
                 _ => {
@@ -1186,7 +1448,7 @@ impl Parser {
                         "Expected statement",
                     ));
                 }
-            };
+            }
         } else {
             return Err(self.error(
                 EXPECTED_VAL,
@@ -1198,6 +1460,7 @@ impl Parser {
     }
 
     pub fn parse(&mut self) -> Result<Vec<(AST, Span)>, Error> {
+        self.scopes.push(ParserScope::new());
         while self.idx < self.tokens.len() {
             let start = self.location().start;
             let stmt = match self.parse_stmt() {
@@ -1207,8 +1470,11 @@ impl Parser {
                 }
             };
 
-            self.program
-                .push((stmt, Span::new(start, self.location().end)));
+            if let Some(s) = stmt {
+                let end = self.tokens[self.idx - 1].1.end;
+                self.program
+                    .push((s, Span::new(start, end)));
+            }
         }
 
         Ok(self.program.clone())
