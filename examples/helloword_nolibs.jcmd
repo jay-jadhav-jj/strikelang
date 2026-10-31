@@ -1,0 +1,16 @@
+text = reqstr{ "Hello, World!" }
+
+@{
+    mov rax, 1
+    mov rdi, 1
+    lea rsi, [rel {text}]
+    mov rdx, {text}_len
+    syscall
+
+    mov rax, 1
+    mov rdi, 1
+    ; newln .rodata string is automatically generated
+    lea rsi, [rel newln]
+    mov rdx, newln_len
+    syscall
+}
