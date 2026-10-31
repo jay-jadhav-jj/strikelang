@@ -19,6 +19,7 @@ pub const ASM_SYNTAX: u16 = 15;
 pub const COMP_INST: u16 = 16;
 pub const IF_SYNTAX: u16 = 17;
 pub const OVERFLOW_ERR: u16 = 18;
+pub const PROC_DEF: u16 = 19;
 
 #[derive(Clone, Copy)]
 pub struct Span {
@@ -98,6 +99,8 @@ impl Error {
             ASM_SYNTAX => String::from("AssemblyBlockSyntaxError"),
             COMP_INST => String::from("CompilerInstructionError"),
             IF_SYNTAX => String::from("IfStatementSyntaxError"),
+            OVERFLOW_ERR => String::from("OverflowError"),
+            PROC_DEF => String::from("ProcedureDefinitionError"),
             _ => String::from("UnknownError"),
         }
     }
@@ -114,15 +117,58 @@ impl Error {
     }
 }
 
+fn source_excerpt(content: &str, location: Span) -> &str {
+    let start = location.start.min(content.len());
+    let end = location.end.min(content.len()).max(start);
+
+    if start < end {
+        return &content[start..end];
+    }
+
+    let mut line_start = content[..start]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    if line_start == start && start > 0 {
+        line_start = content[..start - 1]
+            .rfind('\n')
+            .map_or(0, |newline| newline + 1);
+        return &content[line_start..start - 1];
+    }
+    let line_end = content[start..]
+        .find('\n')
+        .map_or(content.len(), |newline| start + newline);
+    &content[line_start..line_end]
+}
+
 pub fn throw(error: Error) -> ! {
-    eprintln!("{}", &error.content[error.location.unwrap_or(Span::zero()).range()]);
+    if let Some(location) = error.location {
+        eprintln!("{}", source_excerpt(&error.content, location));
+    } else {
+        eprintln!();
+    }
     eprintln!(
         "{:<21}(code {}) ({})",
         error.name, error.code, error.fname
     );
     
     eprintln!("{}", error.body);
-    &eprintln!("Line {}, Index {}", &error.content[..error.location.unwrap_or(Span::zero()).start].matches('\n').count() + 1, error.location.unwrap_or(Span::zero()).start);
-
+    let location = error.location.unwrap_or(Span::zero());
+    eprintln!(
+        "Line {}, Index {}",
+        error.content[..location.start].matches('\n').count() + 1,
+        location.start
+    );
     std::process::exit(error.code as i32);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_width_eof_excerpt_shows_its_source_line() {
+        assert_eq!(source_excerpt("first\nsecond", Span::new(12, 12)), "second");
+        assert_eq!(source_excerpt("first\n", Span::new(6, 6)), "first");
+    }
+
 }
