@@ -87,7 +87,7 @@ endpc
 #! <Example>
 #! input_buf = reqmutstr { 1024 } # 1024 = 256 * 4 (enough for 256 characters)
 #! input input_buf 1024
-#! sayln dynastr { input_buf }
+#! sayln dynastr { input_buf, 1024 }
 #! </Example>
 proc input(buf_addr STR, capacity INT)
     if !isstatic{ buf_addr }
