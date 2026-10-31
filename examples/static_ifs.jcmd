@@ -1,0 +1,11 @@
+use "std/io"
+
+x = 42
+
+if x > 49
+  sayln "X is greater than 49"
+elif x == 49
+  sayln "X is equal to 49"
+else
+  sayln "X is less than 49"
+endif
