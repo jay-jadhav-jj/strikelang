@@ -48,6 +48,11 @@ pub enum Token {
     IsStatic,
     DynaStr,
     DynaAddr,
+    EndProc,
+    IntType,
+    StrType,
+    SCast, // Static zero-cost casting
+    Use,
 }
 
 impl fmt::Display for Token {
@@ -94,7 +99,11 @@ impl fmt::Display for Token {
             Token::IsStatic => write!(f, "IsStatic"),
             Token::DynaStr => write!(f, "DynaStr"),
             Token::DynaAddr => write!(f, "DynaAddr"),
-
+            Token::EndProc => write!(f, "EndProc"),
+            Token::IntType => write!(f, "IntType"),
+            Token::StrType => write!(f, "StrType"),
+            Token::SCast => write!(f, "StaticCast"),
+            Token::Use => write!(f, "Use"),
         }
     }
 }
@@ -104,22 +113,39 @@ pub struct Lexer {
     tokens: Vec<(Token, Span)>,
     line: u32,
     file: String,
-    chars: Vec<char>
+    chars: Vec<char>,
+    byte_offsets: Vec<usize>,
 }
 
 impl Lexer {
     pub fn new(feed: String, file: String) -> Lexer {
+        let chars: Vec<char> = feed.chars().collect();
+        let mut byte_offsets: Vec<usize> = feed.char_indices().map(|(offset, _)| offset).collect();
+        byte_offsets.push(feed.len());
+
         Lexer {
             idx: 0,
             tokens: Vec::new(),
             line: 1,
             file: file,
-            chars: feed.clone().chars().collect()
+            chars,
+            byte_offsets,
         }
     }
 
     fn error(&self, code : u16, start: usize, msg: &str) -> Error {
-        Error::from_code(self.file.clone(), String::from(self.chars.iter().collect::<String>()), &code, Some(Span::new(start, self.location())), msg)
+        let end = if self.idx < self.chars.len() {
+            self.byte_offsets[self.idx + 1]
+        } else {
+            self.location()
+        };
+        Error::from_code(
+            self.file.clone(),
+            String::from(self.chars.iter().collect::<String>()),
+            &code,
+            Some(Span::new(start, end)),
+            msg,
+        )
     }
 
     fn nth_char(&self, idx: usize) -> Option<char> {
@@ -214,18 +240,30 @@ impl Lexer {
     }
 
     fn location(&self) -> usize {
-        self.idx
+        self.byte_offsets[self.idx]
     }
 
     fn pushwloc(&mut self, tok: Token, start: usize) {
-        self.tokens.push((tok, Span::new(start, self.location())));
+        let end = if self.location() == start {
+            let width = match tok {
+                Token::CompareEq | Token::NotEq | Token::GreatEq | Token::LessEq => 2,
+                Token::And if self.nth_char(self.idx + 1) == Some('&') => 2,
+                Token::Or if self.nth_char(self.idx + 1) == Some('|') => 2,
+                _ => 1,
+            };
+            self.byte_offsets[(self.idx + width).min(self.chars.len())]
+        } else {
+            self.location()
+        };
+        self.tokens.push((tok, Span::new(start, end)));
     }
-    
+
     fn lex_asm(&mut self) -> Result<Token, String> {
         self.idx += 1;
         if self.idx >= self.chars.len() || self.nth_char(self.idx).unwrap() != '{' {
             return Err(String::from("Expected asm block (@{ ... })"));
         }
+
         self.idx += 1;
         let mut buf = String::new();
         let mut block_closed = false;
@@ -331,6 +369,11 @@ impl Lexer {
                     "isstatic" => Token::IsStatic,
                     "dynastr" => Token::DynaStr,
                     "dynaaddr" => Token::DynaAddr,
+                    "endpc" => Token::EndProc,
+                    "INT" => Token::IntType,
+                    "STR" => Token::StrType,
+                    "scast" => Token::SCast,
+                    "use" => Token::Use,
                     _ => Token::ID(id),
                 }, start);
                 continue;
@@ -345,7 +388,7 @@ impl Lexer {
                 };
 
                 if strlit.contains(".") {
-                    self.pushwloc(Token::Val(Value::Float((strlit.parse::<f32>().unwrap()))), start);
+                    self.pushwloc(Token::Val(Value::Float(strlit.parse::<f32>().unwrap())), start);
                 } else {
                     self.pushwloc(Token::Val(Value::Int(strlit.parse::<i64>().unwrap())), start);
                 }
@@ -377,11 +420,11 @@ impl Lexer {
                     }
 
                     '{' => {
-                        self.pushwloc(Token::RCurly, self.location());
+                        self.pushwloc(Token::LCurly, self.location());
                     }
 
                     '}' => {
-                        self.pushwloc(Token::LCurly, self.location());
+                        self.pushwloc(Token::RCurly, self.location());
                     }
 
                     '=' => {
@@ -465,21 +508,31 @@ impl Lexer {
                     }
 
                     '&' => {
+                        let start = self.location();
                         if let Some(c) = self.peek() {
                             if c == '&' {
+                                self.pushwloc(Token::And, start);
                                 self.idx += 1;
+                            } else {
+                                self.pushwloc(Token::And, start);
                             }
+                        } else {
+                            self.pushwloc(Token::And, start);
                         }
-                        self.pushwloc(Token::And, self.location());
                     }
 
                     '|' => {
+                        let start = self.location();
                         if let Some(c) = self.peek() {
                             if c == '|' {
+                                self.pushwloc(Token::Or, start);
                                 self.idx += 1;
+                            } else {
+                                self.pushwloc(Token::Or, start);
                             }
+                        } else {
+                            self.pushwloc(Token::Or, start);
                         }
-                        self.pushwloc(Token::Or, self.location());
                     }
 
                     _ => {
