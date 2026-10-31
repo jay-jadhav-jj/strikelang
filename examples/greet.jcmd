@@ -1,4 +1,4 @@
-use "tests/std/io"
+use "std/io"
 
 name_buf = reqmutstr{ 1024 }
 
