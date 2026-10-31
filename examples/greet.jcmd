@@ -1,0 +1,7 @@
+use "tests/std/io"
+
+name_buf = reqmutstr{ 1024 }
+
+inputp "What's your name?: " name_buf 1024
+
+sayln "Hello, " + dynastr{ name_buf, 1024 } + "!"
