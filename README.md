@@ -175,7 +175,7 @@ It may be new at first, but the standard library uses most of these. You can che
   ... code that sets buf ...
   sayln "Hello, " + dynastr{ buf, 1024 }
   ```
-- DynaAddr
+- DynaAddr   
   Returns the address of a given dynamic value, as a static string.
   Example:
   ```
