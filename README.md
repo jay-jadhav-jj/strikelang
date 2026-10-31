@@ -86,12 +86,12 @@ Still, you can make many programs without touching most compiler instructions du
 - Variables   
   Equivalent to python variable assignment/definition   
   `x = 1` can either be declaring `x` or assigning to it
-- Compiler instructions
+- Compiler instructions   
   The bridge between your code and assembly
   `INSTRUCTION_NAME{ arg, arg, ... }`
-  For example, here is the syntax for calling `dynastr`
+  For example, here is the syntax for calling `dynastr`: 
   `dynastr{ "address", 1024 }`
-- If-Elif-Else
+- If-Elif-Else   
   All if statements must end with the endif keyword
   ```
   if CONDITION
@@ -103,17 +103,17 @@ Still, you can make many programs without touching most compiler instructions du
   endif
   ```
   Again, if the condition is static (which they have to be as of now), if statements are evaluated at compile time and have zero runtime cost
-- Exit
-  Exits the program with a given static integer exit code
+- Exit   
+  Exits the program with a given static integer exit code. 
   `exit 0` exits with code 0
-- Use
+- Use   
   Imports code from another StrikeLang file (relative to where you are compiling from)
   `use "std/io"` imports the io library
 - Procedure calls don't use brackets or commas. Arguments are simply whitespace separated
   For example, the `say_err(text STR, code INT)` can be called with `say_err "An error occured" 1`
-- Comments
-  `# Single line comments`
+- Comments   
   ```
+  # Single line comments
   /*
 
     Multi line comments
