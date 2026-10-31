@@ -1,6 +1,6 @@
 // For linux 64 nasm
 use crate::{
-    parser::Type, strikeerror::{ASM_SYNTAX, COMP_ERR, COMP_INST, NOT_IMPLEMENTED, OVERFLOW_ERR, TYPE_ERR},
+    parser::{AST::ProcDef, Type}, strikeerror::{ASM_SYNTAX, COMP_ERR, COMP_INST, NOT_IMPLEMENTED, TYPE_ERR},
 };
 
 use super::*;
@@ -170,7 +170,7 @@ impl Compiler {
                 None
             }
 
-            AST::UnaryOp { op, expr } => {
+            AST::UnaryOp { op: _, expr } => {
                 if self.get_type(expr) == Some(Type::Int) {
                     return Some(Type::Int);
                 }
@@ -182,17 +182,29 @@ impl Compiler {
                 None // Strings shouldn't have unary operators
             }
 
-            AST::ReqStr { .. } | AST::ReqMutStr { .. } | AST::DynaStr { .. } | AST::DynaAddr { .. }  => Some(Type::Str),
+            AST::ReqStr { .. } | AST::ReqMutStr { .. } | AST::DynaStr { .. } | AST::DynaAddr { .. } => Some(Type::Str),
 
             AST::IsStatic { .. } => Some(Type::Bool),
 
+            AST::SCast { expr, t } => Some(t.clone()),
             _ => None,
         }
     }
 
-    fn eval_static_num(&self, node: &AST, loc: Span) -> Result<i64, Error> {
+    fn eval_static_num(&mut self, node: &AST, loc: Span) -> Result<i64, Error> {
         // Later add float support
         match node {
+            AST::SCast { expr, t } => {
+                if *t == Type::Int {
+                    let val = self.static_cast(AST::SCast { expr: expr.clone(), t: Type::Int }, loc)?;
+
+                    if let KnownVal::Int(i) = val {
+                        return Ok(i);
+                    }
+                }
+                return Err(self.error(TYPE_ERR, loc, "Static cast to invalid type, expected boolean"));
+            }
+
             AST::Value { val } => {
                 if let lexer::Value::Int(i) = val {
                     return Ok(*i as i64);
@@ -208,7 +220,7 @@ impl Compiler {
                             }
                         }
 
-                        Value::Dynamic { val } => {} // Falls back to error
+                        Value::Dynamic { val: _ } => {} // Falls back to error
                     }
                 }
             }
@@ -254,6 +266,17 @@ impl Compiler {
 
     fn eval_static_str(&mut self, node: &AST, loc: Span, nomut: bool) -> Result<String, Error> {
         match node {
+            AST::SCast { expr, t } => {
+                if *t == Type::Str {
+                    let val = self.static_cast(AST::SCast { expr: expr.clone(), t: Type::Str }, loc)?;
+
+                    if let KnownVal::Str{ raw, len} = val {
+                        return Ok(raw);
+                    }
+                }
+                return Err(self.error(TYPE_ERR, loc, "Static cast to invalid type, expected boolean"));
+            }
+
             AST::Value { val } => {
                 if let lexer::Value::Str(s) = val {
                     return Ok(String::from(s));
@@ -264,12 +287,12 @@ impl Compiler {
                 if let Some(v) = self.get_var(id.clone()) {
                     match v.val {
                         Value::Known { val } => {
-                            if let KnownVal::Str { raw, len } = val {
+                            if let KnownVal::Str { raw, len: _ } = val {
                                 return Ok(raw);
                             }
                         }
 
-                        Value::Dynamic { val } => {
+                        Value::Dynamic { val: _ } => {
                             return Err(self.error(COMP_ERR, loc, "Expected static value"));
                         }
                     }
@@ -355,6 +378,17 @@ impl Compiler {
     
     fn eval_static_bool(&mut self, node: &AST, loc: Span) -> Result<bool, Error> {
         match node {
+            AST::SCast { expr, t } => {
+                if *t == Type::Bool {
+                    let val = self.static_cast(AST::SCast { expr: expr.clone(), t: Type::Bool }, loc)?;
+
+                    if let KnownVal::Bool(b) = val {
+                        return Ok(b);
+                    }
+                }
+                return Err(self.error(TYPE_ERR, loc, "Static cast to invalid type, expected boolean"));
+            }
+
             AST::Value { val } => {
                 if let lexer::Value::Bool(b) = val {
                     return Ok(*b);
@@ -370,7 +404,7 @@ impl Compiler {
                             }
                         }
 
-                        Value::Dynamic { val } => {
+                        Value::Dynamic { val: _ } => {
                             return Err(self.error(COMP_ERR, loc, "Expected static value"));
                         }
                     }
@@ -531,7 +565,7 @@ impl Compiler {
 
     fn is_static(&self, node: &AST) -> bool {
         match node {
-            AST::Value { val } => true, // If its just a raw value it must be static
+            AST::Value { val: _ } => true, // If its just a raw value it must be static
             AST::VarGet { id } => {
                 for var in self.view_scope().vars {
                     if var.id == *id {
@@ -544,9 +578,9 @@ impl Compiler {
 
                 false
             }
-            AST::UnaryOp { op, expr } => self.is_static(expr),
-            AST::BinOp { left, op, right } => self.is_static(left) && self.is_static(right),
-            AST::ReqStr { .. } | AST::ReqMutStr { .. } | AST::IsStatic { .. } | AST::DynaAddr { .. } => true, // Req(Mut)Str returns same address, disregarding the value supplied
+            AST::UnaryOp { op: _, expr } => self.is_static(expr),
+            AST::BinOp { left, op: _, right } => self.is_static(left) && self.is_static(right),
+            AST::ReqStr { .. } | AST::ReqMutStr { .. } | AST::IsStatic { .. } | AST::DynaAddr { .. }  | AST::SCast { .. } => true, // Req(Mut)Str returns same address, disregarding the value supplied
 
             AST::If {
                 cond,
@@ -605,7 +639,7 @@ impl Compiler {
                                 return Ok(data_addr == addr);
                             }
 
-                            DynamicVal::Str { data_addr, len_addr, len } => {
+                            DynamicVal::Str { data_addr, len_addr, len: _ } => {
                                 return Ok(data_addr == addr || len_addr == addr) ;
                             }
 
@@ -617,11 +651,11 @@ impl Compiler {
                 }
             }
 
-            AST::BinOp { left, op, right } => {
+            AST::BinOp { left, op: _, right } => {
                 return Ok(self.uses_addr(left, addr.clone(), loc)? || self.uses_addr(right, addr, loc)?);
             }
 
-            AST::UnaryOp { op, expr } => {
+            AST::UnaryOp { op: _, expr } => {
                 return self.uses_addr(expr, addr.clone(), loc);
             }
 
@@ -659,11 +693,11 @@ impl Compiler {
                 return Ok(false);
             }
 
-            AST::VarSet { id, expr } => {
+            AST::VarSet { id: _, expr } => {
                 return self.uses_addr(expr, addr, loc);
             }
 
-            AST::DynaStr { str_addr, len} => {
+            AST::DynaStr { str_addr, size} => {
                 if self.is_static(str_addr) {
                     let val = self.eval_static_str(node, loc, true)?;
 
@@ -721,18 +755,13 @@ impl Compiler {
         }
 
         match node {
-            AST::DynaStr { str_addr, len} => {
+            AST::DynaStr { str_addr, size} => {
                 // It is the developer's responsibility to make sure the addressses are valid
                 if self.is_static(str_addr) {
-                    if self.is_static(len) {
-                        let val = self.eval_static_num(len, loc)?;
-                        // TODO: Check if val is float
-                        if val < 0 {
-                            return Err(self.error(TYPE_ERR, loc, "dynastr requires positive integer length"));
-                        }
-                        return Ok((self.eval_static_str(str_addr, loc, false)?, val as usize, (self.eval_static_str(str_addr, loc, false)? + "_len")));
+                    if self.is_static(size) {
+                        return Ok((self.eval_static_str(str_addr, loc, false)?, self.eval_static_num(size, loc)? as usize, (self.eval_static_str(str_addr, loc, false)? + "_len")));
                     }
-                    return Err(self.error(TYPE_ERR, loc, "dynastr requires a STATIC integer length;"));
+                    return  Err(self.error(TYPE_ERR, loc, "dynastr requires a STATIC integer value"));
                 }
                 return Err(self.error(TYPE_ERR, loc, "dynastr requires a STATIC string value;"));
             }
@@ -766,8 +795,8 @@ impl Compiler {
                         let buf = self.get_str_buf(lres.1 + rres.1);
                         
                         self.text += "\n\tcld";
-                        self.text += &format!("\n\tmov rsi, {}", lres.0);
-                        self.text += &format!("\n\tmov rdi, {}", buf);
+                        self.text += &format!("\n\tlea rsi, [rel {}]", lres.0);
+                        self.text += &format!("\n\tlea rdi, [rel {}]", buf);
                         if lres.2 == String::new() { // Length known at compile time/static
                             self.text += &format!("\n\tmov rcx, {}", lres.1);
                         } else {
@@ -775,7 +804,7 @@ impl Compiler {
                         }
                         self.text += "\n\trep movsb";
 
-                        self.text += &format!("\n\tmov rsi, {}", rres.0);
+                        self.text += &format!("\n\tlea rsi, [rel {}]", rres.0);
                         if rres.2 == String::new() { // Length known at compile time/static
                             self.text += &format!("\n\tmov rcx, {}", rres.1);
                         } else {
@@ -840,7 +869,7 @@ impl Compiler {
     }
 
     fn set_var(&mut self, var: Variable) {
-        for mut scope in self.scopes.iter_mut().rev() {
+        for scope in self.scopes.iter_mut().rev() {
             for v in scope.vars.iter_mut() {
                 if v.id == var.id {
                     *v = var;
@@ -870,6 +899,106 @@ impl Compiler {
         self.bss += &format!("\n\t{}_len resd 1", address);
 
         address
+    }
+
+    fn static_cast(&mut self, node: AST, loc: Span) -> Result<KnownVal, Error> {
+        if let AST::SCast { expr, t } = node {
+                if !self.is_static(&*expr) {
+                    return Err(self.error(TYPE_ERR, loc, "scast expects a static value; use isstatic{ANY} to check if a value is static"));
+                }
+
+                if let Some(ty) = self.get_type(&*expr){
+                    match ty {
+                        Type::Str => {
+                            let val = self.eval_static_str(&*expr, loc, false)?;
+
+                            match t {
+                                Type::Str => {
+                                    return Ok(KnownVal::Str { raw: val.clone(), len: val.len() });
+                                }
+
+                                Type::Int => {
+                                    return Ok(KnownVal::Int(match val.parse::<i64>() {
+                                        Ok(i) => i,
+                                        Err(_) => return Err(self.error(TYPE_ERR, loc, "scast received a string that cannot be converted to an integer")),
+                                    }));
+                                }
+                                
+                                Type::Bool => {
+                                    return Ok(KnownVal::Bool(match val.to_lowercase().as_ref() {
+                                        "true" => true,
+                                        "false" => false,
+                                        _ => return Err(self.error(TYPE_ERR, loc, "scast received a string that cannot be converted to a boolean")),
+                                    }));
+                                }
+
+                                _ => {
+                                    return Err(self.error(TYPE_ERR, loc, "scast received an invalid type; scast works on PRIMITIVE TYPES (STR, INT, BOOL)"));
+                                }
+                            }
+                        }
+
+                        Type::Int => {
+                            let val = self.eval_static_num(&*expr, loc)?;
+                            match t {
+                                Type::Int => {
+                                    return Ok(KnownVal::Int(val));
+                                }
+
+                                Type::Str => {
+                                    return Ok(KnownVal::Str { raw: val.to_string(), len: val.to_string().len() })
+                                }
+
+                                Type::Bool => {
+                                    return Ok(KnownVal::Bool(match val {
+                                        0 => false,
+                                        _ => true
+                                    }));
+                                }
+
+                                _ => {
+                                    return Err(self.error(TYPE_ERR, loc, "scast received an invalid type; scast works on PRIMITIVE TYPES (STR, INT, BOOL)"));
+                                }
+                            };
+                        }
+
+                        Type::Bool => {
+                            let val = self.eval_static_bool(&*expr, loc)?;
+                            match t {
+                                Type::Bool => {
+                                    return Ok(KnownVal::Bool(val));
+                                }
+
+                                Type::Str => {
+                                    if val {
+                                        return Ok(KnownVal::Str { raw: String::from("true"), len: 4 });
+                                    } 
+                                    return Ok(KnownVal::Str { raw: String::from("false"), len: 5 });
+                                }
+
+                                Type::Int => {
+                                    return Ok(KnownVal::Int(match val {
+                                        false => 0,
+                                        true => 1
+                                    }));
+                                }
+
+                                _ => {
+                                    return Err(self.error(TYPE_ERR, loc, "scast received an invalid type; scast works on PRIMITIVE TYPES (STR, INT, BOOL)"));
+                                }
+                            };
+                        }
+
+                        _ => {
+                            return Err(self.error(TYPE_ERR, loc, "scast received an invalid expression; scast works on PRIMITIVE TYPES (STR, INT, BOOL)"));
+                        }
+                    };
+                } else {
+                    return Err(self.error(TYPE_ERR, loc, "scast received an invalid expression; scast works on PRIMITIVE TYPES (STR, INT, BOOL)"));
+                }
+            }
+
+        Err(self.error(COMP_INST, loc, "Unable to resolve scast value"))
     }
 
     fn compile_set_var(&mut self, node: AST, loc: Span) -> Result<(), Error> {
@@ -976,13 +1105,23 @@ impl Compiler {
 
     fn compile_exit(&mut self, node: AST, loc: Span) -> Result<(), Error> {
         if let AST::Exit { code } = node {
-            if self.get_type(&*code) == Some(Type::Int) && self.is_static(&*code) {
-                let val = self.eval_static_num(&*code, loc)?;
+            if self.is_static(&*code) {
+                if matches!(self.get_type(&*code), Some(Type::Int)) {
+                    let val = self.eval_static_num(&*code, loc)?;
+                    if val < 0 {
+                        return Err(self.error(
+                            COMP_INST,
+                            loc,
+                            "Exit code must be a non-negative integer",
+                        ));
+                    }
 
-                self.text += "\n\tmov rax, 60";
-                self.text += &format!("\n\tmov rdi, {}", val.to_string());
-                self.text += "\n\tsyscall";
-                return Ok(());
+                    self.text += "\n\tmov rax, 60";
+                    self.text += &format!("\n\tmov rdi, {}", val.to_string());
+                    self.text += "\n\tsyscall";
+                    return Ok(());
+                }
+
             }
         }
         Err(self.error(COMP_ERR, loc, "Unable to compile exit statement"))
@@ -992,7 +1131,7 @@ impl Compiler {
         if let AST::ASM { body } = node {
             let mut parsed = String::new();
             let mut idx = 0 as usize;
-            let mut chars: Vec<char> = body.chars().collect();
+            let chars: Vec<char> = body.chars().collect();
 
             while idx < chars.len() {
                 if chars[idx] == '{' {
@@ -1017,10 +1156,10 @@ impl Compiler {
                         ));
                     }
 
-                    if let Some(Variable { id, val, t }) = self.get_var(String::from(buf.trim())) {
+                    if let Some(Variable { id: _, val, t }) = self.get_var(String::from(buf.trim())) {
                         if t == Type::Str {
                             if let Value::Known { val } = val {
-                                if let KnownVal::Str { raw, len } = val {
+                                if let KnownVal::Str { raw, len: _ } = val {
                                     parsed += &raw;
                                     continue;
                                 }
@@ -1125,6 +1264,105 @@ impl Compiler {
         Err(self.error(COMP_ERR, loc, "Unable to compile if statement"))
     }
 
+    fn define_proc(&mut self, node: AST, loc: Span) -> Result<(), Error> {
+        if matches!(node, AST::ProcDef { .. }) {
+
+            let scopes_len = self.scopes.len();
+            self.scopes[scopes_len - 1].procs.push(node.clone());
+
+            return Ok(());
+        }
+
+        Err(self.error(COMP_ERR, loc, "Unable to define procedure"))
+    }
+
+    fn compile_proc_call(&mut self, node: AST, loc: Span) -> Result<(), Error> {
+        if let AST::ProcCall { name, args } = node {
+            let call_name = name;
+            let scopes_len = self.scopes.len();
+            for proc in self.view_scope().procs {
+                if let AST::ProcDef { name, params, body } = proc {
+                    if name != call_name {
+                        continue;
+                    }
+                    let mut proc_scope = CompilerScope::new();
+
+                    for (i, a) in args.iter().enumerate() {
+                        if self.is_static(a) {
+                            let val = match self.get_type(a) {
+                                Some(Type::Str) => {
+                                    let val = self.eval_static_str(a, loc, false)?;
+                                    Value::Known {
+                                        val: KnownVal::Str {
+                                            raw: val.clone(),
+                                            len: val.len(),
+                                        },
+                                    }
+                                }
+
+                                Some(Type::Int) => {
+                                    let val = self.eval_static_num(a, loc)?;
+                                    Value::Known {
+                                        val: KnownVal::Int(val),
+                                    }
+                                }
+
+                                Some(Type::Bool) => {
+                                    let val = self.eval_static_bool(a, loc)?;
+                                    Value::Known {
+                                        val: KnownVal::Bool(val),
+                                    }
+                                }
+
+                                Some(_) | None => {
+                                    return Err(self.error(TYPE_ERR, loc, "Invalid argument type for procedure call"));
+                                }
+                            };
+
+                            proc_scope.vars.push(Variable { id: params[i].0.clone(), val: val, t: params[i].1.clone() });
+                        } else {
+                            let val = match self.get_type(a) {
+                                Some(Type::Str) => {
+                                    let (addr, len, len_addr) = self.eval_dynamic_str(a, loc)?;
+                                    Value::Dynamic { val: DynamicVal::Str { data_addr: addr, len_addr: len_addr, len: len } }
+                                }
+
+                                Some(Type::Int) => {
+                                    // TODO: Dyna ints
+                                    return Err(Error::placeholder())
+                                }
+
+                                Some(Type::Bool) => {
+                                    // TODO: Dyna bools
+                                    return Err(Error::placeholder())
+                                }
+
+                                Some(_) | None => {
+                                    return Err(self.error(TYPE_ERR, loc, "Invalid argument type for procedure call"));
+                                }
+                            };
+
+                            proc_scope.vars.push(Variable { id: params[i].0.clone(), val: val, t: params[i].1.clone() });
+                        }
+                    };
+                    
+                    self.scopes.push(proc_scope);
+
+                    for stmt in body {
+                        self.compile_stmt(*stmt.clone(), loc)?;
+                    }
+
+                    let scopes_len = self.scopes.len();
+
+                    self.scopes.remove(scopes_len - 1);
+
+                    return Ok(());
+                }
+            }
+        }
+        return Err(self.error(COMP_ERR, loc, "Unable to compile procedure call"));
+    }
+
     fn compile_stmt(&mut self, stmt: AST, span: Span) -> Result<(), Error> {
         match stmt {
             AST::Exit { .. } => return self.compile_exit(stmt, span),
@@ -1134,6 +1372,10 @@ impl Compiler {
             AST::ASM { .. } => return self.compile_asmblock(stmt, span),
 
             AST::If { .. } => return self.compile_if(stmt, span),
+
+            AST::ProcDef { .. } => return self.define_proc(stmt, span),
+
+            AST::ProcCall { .. } => return self.compile_proc_call(stmt, span),
 
             _ => {
                 return Err(self.error(NOT_IMPLEMENTED, span, "Can't compile this statement"));
