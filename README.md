@@ -15,6 +15,7 @@ Also, the file extension for StrikeLang scripts MUST be .jcmd, or the compiler w
 To compile StrikeLang code, use `strk c <PATH> <OUTPUT_NAME>`   
 The compiled binary is in the releases section of the repo.   
 I recommend also using the standard library (`std/io` in this branch).   
+You can view the source code in the `source code` branch
 
 ---
 ## Features
@@ -40,7 +41,6 @@ I liked the simple syntax of scripting languages like Python, but for me, their 
 You shouldn't have to sacrifice speed for ease of use. 
 Since I know Assembly and Rust, I decided to create a compiled language that has simple and easy to understand syntax.
 It is relatively simple compared to languages like C or C++, but runs at very fast speeds (try compiling a strikelang program and running it).
-Also, I chose the name StrikeLang because I liked the character Striker Eureka from Pacific Rim.
 
 ---
 ## Why does it compile to NASM
@@ -137,8 +137,9 @@ Still, you can make many programs without touching most compiler instructions du
   ```
 ---
 ## Compiler instructions
-Here are the implemented compiler instructions which you will need to add functionality that isn't available in the standard library.   
-It may be new at first, but the standard library uses most of these. You can check that code out to see these in use.   
+Here are the implemented compiler instructions which you will need to interact with the generated assembly. 
+All compiler instructions are evaluated at compile time and have zero runtime overhead. You can see most of these in use 
+in the `std/io.jcmd` library, in this branch.    
 - Inline assembly   
   Written like
   ```
