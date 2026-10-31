@@ -59,7 +59,7 @@ proc sayln(text STR)
     newln
 endpc
 
-#! Writes the text 'ERROR: ' to stdout, followed by whatever you put and a newline. Exits with given code
+#! Writes the text 'ERROR: ' to stderr, followed by whatever you put and a newline. Exits with given code
 #! This will end the program if called
 #! Works with dynamic and static strings alike
 #! <text>
@@ -72,7 +72,38 @@ endpc
 #! say_err "Exiting with code 21" 21
 #! </Example>
 proc say_err(text STR, code INT)
-    sayln "ERROR: " + text
+    if isstatic{ text }
+        addr = reqstr{ "ERROR: " + text } # Get the address or generate 'text'
+        @{
+            mov rax, 1
+            mov rdi, 2
+            lea rsi, [rel {addr}]
+            mov rdx, {addr}_len
+            syscall
+        }
+    else
+        addr = dynaaddr{ "ERROR: " + text } # The address must already have been generated
+        @{
+            mov rax, 1
+            mov rdi, 2
+            lea rsi, [rel {addr}]
+            mov edx, dword [{addr}_len]
+            syscall
+        }
+    endif
+
+    if !isstatic{ code }
+        addr = reqstr{ "Error code must be static" }
+        @{
+            mov rax, 1
+            mov rdi, 2
+            lea rsi, [rel {addr}]
+            mov rdx, {addr}_len
+            syscall      
+        }
+        exit 1
+    endif
+    
     exit code
 endpc
 
