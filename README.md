@@ -2,7 +2,7 @@
 ---  
 > [!NOTE]
 > This is not a release of the language, it still lacks many features.   
-> This is just a view of the language so far to showcase.   
+> This is just a view of the language so far to showcase. As of now, it only compiles to linux x86_64 NASM. If you are on windows like I am, use WSL nasm and ld/gcc to compile the executable.   
 > What's missing:   
 > - Dynamic String comparisons (== will not work with dynamic strings)
 > - Dynamic booleans and integers
