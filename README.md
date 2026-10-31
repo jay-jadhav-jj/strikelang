@@ -12,7 +12,9 @@
 > - No escape characters/special string formatting
 
 Also, the file extension for StrikeLang scripts MUST be .jcmd, or the compiler won't accept it!   
-To compile StrikeLang code, use `strk c <PATH> <OUTPUT_NAME>`
+To compile StrikeLang code, use `strk c <PATH> <OUTPUT_NAME>`   
+The compiled binary is in the releases section of the repo.   
+I recommend also using the standard library (`std/io` in this branch).   
 
 ---
 ## Features
