@@ -10,6 +10,9 @@
 > - Standard library (small std/io library is included though)
 > - Floats (be careful with division; can lead to undefined errors as of now)
 
+Also, the file extension for StrikeLang scripts MUST be .jcmd, or the compiler won't accept it!   
+To compile StrikeLang code, use `strk c <PATH> <OUTPUT_NAME>`
+
 ---
 ## Features
 
