@@ -9,6 +9,7 @@
 > - Functions that return values
 > - Standard library (small std/io library is included though)
 > - Floats (be careful with division; can lead to undefined errors as of now)
+> - No escape characters/special string formatting
 
 Also, the file extension for StrikeLang scripts MUST be .jcmd, or the compiler won't accept it!   
 To compile StrikeLang code, use `strk c <PATH> <OUTPUT_NAME>`
@@ -66,6 +67,7 @@ Still, you can make many programs without touching most compiler instructions du
 
 ---
 ## Syntax
+- String values: `"text"`
 - Procedures (functions that don't return values) are defined like this
   ```
   proc PROC_NAME(param_name TYPE, param_name TYPE, ...)
