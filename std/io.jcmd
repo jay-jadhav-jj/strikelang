@@ -1,0 +1,133 @@
+#! STD/IO Input/Output library, version Alpha 0.1
+
+#! Writes text to stdout, works with dynamic and static strings
+#! As with any procedure, it is a zero-cost abstraction (equivalent to literally just writing the compiler instructions)
+#! It is the equivalent of the print() function in Python or std::cout in C++, however it does not yet support formatting
+#! <text>
+#! Any string
+#! </text>
+#! <Example>
+#! say "Hello, World!"
+#! </Example>
+proc say (text STR)
+    if isstatic{ text }
+        addr = reqstr{ text } # Get the address or generate 'text'
+        @{
+            mov rax, 1
+            mov rdi, 1
+            lea rsi, [rel {addr}]
+            mov rdx, {addr}_len
+            syscall
+        }
+    else
+        addr = dynaaddr{ text } # The address must already have been generated
+        @{
+            mov rax, 1
+            mov rdi, 1
+            lea rsi, [rel {addr}]
+            mov edx, dword [{addr}_len]
+            syscall
+        }
+    endif
+endpc
+
+#! Writes a newline character to stdout
+#! Since there's no string formatting yet, this is an easy way to generate newlines
+#! Use this instead of sayln if you only want a newline; sayln performs two seperate syscalls whereas newln performs only one
+#! <Example>
+#! say "Three new lines"
+#! newln newln newln
+#! </Example>
+proc newln()
+    @{
+        mov rax, 1
+        mov rdi, 1
+        lea rsi, [rel newln]
+        mov rdx, newln_len
+        syscall
+    }
+endpc
+
+#! Writes text to stdout, followed by a newline
+#! Internally, calls say(STR) followed by newln()
+#! <Example>
+#! sayln "Hello, World!"
+#! /* same as writing say "Hello, World!" newln */
+#! </Example>
+proc sayln(text STR)
+    say text
+    newln
+endpc
+
+#! Writes the text 'ERROR: ' to stdout, followed by whatever you put and a newline. Exits with given code
+#! This will end the program if called
+#! Works with dynamic and static strings alike
+#! <text>
+#! The error message to display
+#! </text>
+#! <code>
+#! The error code to exit with; must be static
+#! </code>
+#! <Example>
+#! say_err "Exiting with code 21" 21
+#! </Example>
+proc say_err(text STR, code INT)
+    sayln "ERROR: " + text
+    exit code
+endpc
+
+#! Writes input to given address from stdin
+#! Buffer address should be created through reqmutstr{ BYTES }
+#! <buf_addr>
+#! Address created through reqmutstr { BYTES }
+#! </buf_addr>
+#! <capacity>
+#! Capacity of the buffer in bytes; must be static. If it is incorrect, extra bytes from stdin will be read but not stored
+#! </capacity>
+#! <Example>
+#! input_buf = reqmutstr { 1024 } # 1024 = 256 * 4 (enough for 256 characters)
+#! input input_buf 1024
+#! sayln dynastr { input_buf }
+#! </Example>
+proc input(buf_addr STR, capacity INT)
+    if !isstatic{ buf_addr }
+        say_err "Invalid buffer" 1
+    endif
+
+    if capacity < 1
+        say_err "Capacity must be atleast 1 byte" 1
+    endif
+
+    cap_str = scast{ capacity, STR }
+
+    @{
+        mov rax, 0
+        mov rdi, 0
+        lea rsi, [rel {buf_addr}]
+        mov rdx, {cap_str}
+        syscall
+
+        dec rax
+        mov dword [{buf_addr}_len], eax
+    }
+endpc
+
+#! Calls say(STR), followed by input(STR, INT)
+#! Buffer address should be created through reqmutstr{ BYTES }
+#! <prompt>
+#! The string text to use with say(STR)
+#! </prompt>
+#! <buf_addr>
+#! Address created through reqmutstr { BYTES }
+#! </buf_addr>
+#! <capacity>
+#! Capacity of the buffer in bytes; must be static. If it is incorrect, extra bytes from stdin will be read but not stored
+#! </capacity>
+#! <Example>
+#! name_buf = reqmutstr { 1024 } # 1024 = 256 * 4 (enough for 256 characters)
+#! inputp "What's your name?: " name_buf 1024
+#! </Example>
+proc inputp(prompt STR, buf_addr STR, capacity INT)
+    say prompt
+    input buf_addr capacity
+endpc
