@@ -1,5 +1,10 @@
 # StrikeLang
 ---  
+> [!IMPORTANT]
+> Currently, I'm refactoring the expression buffer system to use the stack instead (bound to scopes) for less binary bloat.   
+> This will also allow me to make functions   
+> Also I am finalizing the dynamic types
+
 > [!NOTE]
 > This is not a release of the language, it still lacks many features.   
 > This is just a view of the language so far to showcase. As of now, it only compiles to linux x86_64 NASM. If you are on windows like I am, use WSL nasm and ld/gcc to compile the executable.   
